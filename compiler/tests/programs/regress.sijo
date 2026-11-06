@@ -1,0 +1,147 @@
+// Regression tests for bugs found by adversarial testing. Every line is "check <name> <got> <want>".
+using Sijo;
+
+public struct SCounter
+{
+    public int A;
+    public mut void Bump() { A += 1; }
+}
+
+public enum EKind { Zero, One }
+
+public static class Util
+{
+    public static bool IsNonZero(int d) => d != 0;
+    public static int Inverse(int d) => 100 / d;
+    public static void Fill(out List<int> xs)
+    {
+        xs = new List<int>();
+        xs.Add(1);
+        xs.Add(2);
+        xs.Add(3);
+    }
+    public static void AddTo(ref int x, int k) { x += k; }
+}
+
+public class Base : Entity
+{
+    public mut int A;
+    public mut int Tries;
+    public virtual void Mod() { A = 1; }
+    public void Update(float dt)
+    {
+        atomic
+        {
+            Tries += 1;
+            Mod();
+            fail;
+        }
+    }
+}
+
+public class Derived : Base
+{
+    public mut int B;
+    public override void Mod() { A = 1; B = 1; }
+}
+
+public class Holder : Entity
+{
+    public mut List<int> Kept;
+    public mut int in 0..100 Hp = 50;
+    public mut float in 0..10 F = 5;
+    public mut EKind Kind;
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            mut List<int> tmp;
+            Util.Fill(out tmp);
+            Kept = tmp;
+        }
+        Util.AddTo(ref Hp, 1000);
+        F = F / 0.0 * 0.0; // NaN: a range type (float in 0..10) maps it to the lower bound
+        Kind = (EKind)(Time.Tick + 5);
+    }
+    public client void Render()
+    {
+        Draw.Sprite((int)Kind + Hp, F, 0);
+    }
+}
+
+public class Victim : Entity
+{
+    public void Update(float dt) { Destroy(); }
+}
+
+public class Watcher : Entity
+{
+    public Victim? Target;
+    public mut int Seen;
+    public void Update(float dt)
+    {
+        if (Target is Victim v)
+        {
+            Seen += 1;
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Base { });
+        Spawn(new Derived { });
+        Spawn(new Holder { });
+        var victim = Spawn(new Victim { });
+        Spawn(new Watcher { Target = victim });
+    }
+
+    public static void Update(float dt)
+    {
+        int z = Time.Tick - Time.Tick;
+        // short-circuit with calls on both sides
+        bool bSafe = Util.IsNonZero(z) && Util.Inverse(z) > 1;
+        Print($"check short-circuit {bSafe} False");
+        // C# left-to-right evaluation of side effects
+        mut int m = 5;
+        m += m++ * 2;
+        mut int n = 1;
+        int q = n + (n = 10) + n;
+        Print($"check sequencing {m * 100 + q} 1521");
+        // x = x.Clone() keeps the contents
+        mut List<int> l = new List<int>();
+        l.Add(7);
+        l = l.Clone();
+        Print($"check self-clone {l.Count} 1");
+        // atomic rolls back a struct mutated through a method
+        mut SCounter c = new SCounter();
+        atomic
+        {
+            c.Bump();
+            fail;
+        }
+        Print($"check atomic-struct {c.A} 0");
+        if (Time.Tick == 3)
+        {
+            mut int a = 0;
+            mut int b = 0;
+            foreach (var e in Query<Base>()) { a += e.A + e.Tries * 0; }
+            foreach (var d in Query<Derived>()) { b += d.B; }
+            Print($"check atomic-override {a * 10 + b} 0");
+            mut int sum = 0;
+            mut int hp = 0;
+            foreach (var h in Query<Holder>())
+            {
+                foreach (var x in h.Kept) { sum += x; }
+                hp = h.Hp;
+            }
+            Print($"check out-list-survives-ticks {sum} 6");
+            Print($"check range-through-ref {hp} 100");
+            mut int seen = 0;
+            foreach (var w in Query<Watcher>()) { seen += w.Seen; }
+            Print($"check is-sees-destroy {seen} 0");
+        }
+    }
+}

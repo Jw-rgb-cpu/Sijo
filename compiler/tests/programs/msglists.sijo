@@ -1,0 +1,132 @@
+// Messages (calls on another entity, applied at the end of the system) with lists and arrays as
+// arguments: the message carries a copy, so the receiver gets its own. A borrowed parameter lives
+// for the call; an `own` parameter belongs to the receiving method, which may keep it in a field
+// (the sender's list moved into the message). Lists of strings, of structs holding strings, of
+// lists, arrays and multi-dimensional arrays; a message dropped by `fail` in an atomic block.
+public struct STag
+{
+    public int N;
+    public string Label;
+}
+
+public class Inbox : Entity
+{
+    public mut int Total;
+    public mut string Log = "";
+    public mut List<int> Kept;
+    public mut List<string> Names;
+    public mut int[,] Grid;
+
+    public void Receive(List<int> xs, string from)
+    {
+        mut int s = 0;
+        foreach (int x in xs)
+        {
+            s += x;
+        }
+        Total += s;
+        Log += $"{from}:{xs.Count}/{s} ";
+    }
+
+    public void Keep(own List<int> xs)
+    {
+        Kept = xs;
+    }
+
+    public void Words(string[] ws, List<STag> tags)
+    {
+        Log += string.Join("+", ws) + "|";
+        foreach (var t in tags)
+        {
+            Log += $"{t.Label}={t.N} ";
+        }
+    }
+
+    public void Store(own List<string> names, int[,] g, List<List<int>> nested)
+    {
+        Names = names;
+        Grid = g.Clone();
+        foreach (var row in nested)
+        {
+            Total += row.Count * 100;
+            foreach (int v in row)
+            {
+                Total += v;
+            }
+        }
+    }
+
+    public void Clear()
+    {
+        Log = "";
+    }
+}
+
+public class Sender : Entity
+{
+    public Inbox? To;
+    public int K;
+
+    public void Update(float dt)
+    {
+        if (To is Inbox box)
+        {
+            int t = Time.Tick;
+            mut var xs = new List<int>();
+            for (int i = 0; i <= K + t % 3; i++)
+            {
+                xs.Add(i * K);
+            }
+            box.Receive(xs, $"s{K}");
+            xs.Add(1000);
+            string[] ws = { $"w{K}", "x" };
+            mut var tags = new List<STag>();
+            tags.Add(new STag { N = K * t, Label = $"k{K}" });
+            box.Words(ws, tags);
+            if (K == 1)
+            {
+                var keep = new List<int> { K, t, xs.Count };
+                atomic
+                {
+                    box.Keep(keep);
+                    if (t % 4 == 0)
+                    {
+                        fail;
+                    }
+                }
+                var names = new List<string> { "ann", $"t{t}" };
+                mut int[,] g = new int[2, 3];
+                g[1, 2] = t;
+                mut var nested = new List<List<int>>();
+                nested.Add(new List<int> { 1, t });
+                nested.Add(new List<int>());
+                box.Store(names, g, nested);
+            }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        var box = Spawn(new Inbox());
+        for (int k = 0; k < 3; k++)
+        {
+            Spawn(new Sender { To = box, K = k });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 4 == 0)
+        {
+            foreach (var b in Query<Inbox>())
+            {
+                Print($"tick {Time.Tick}: total={b.Total} kept={string.Join(",", b.Kept)} names={string.Join(",", b.Names)} grid={b.Grid.GetLength(0)}x{b.Grid.GetLength(1)}:{b.Grid[1, 2]}");
+                Print($"  {b.Log.Trim()}");
+                b.Clear();
+            }
+        }
+    }
+}

@@ -1,0 +1,15 @@
+ops 7 12 -1
+closures 6 11 18 60
+list 169 3
+hi bob
+default 0
+struct 21
+odd even
+t1 hp 95 score 17 tag 'ship:95'
+t1 mine power 40 mines 1
+t2 hp 91 score 113 tag 'ship:91'
+t2 mine power 0 mines 0
+t3 hp 86 score 109 tag 'ship:86'
+t3 mine power 0 mines 0
+t4 hp 81 score 104 tag 'ship:81'
+t4 mine power 0 mines 0

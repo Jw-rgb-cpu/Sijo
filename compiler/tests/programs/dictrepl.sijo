@@ -1,0 +1,108 @@
+// Replicated dictionaries: client code reads dictionaries keyed by enums, strings and entity
+// references, with struct values that hold strings. A dictionary travels like a list of its
+// key/value pairs in its own order (insertion order; Remove moves the last pair into the hole), and
+// the client rebuilds its index; pairs keyed by an entity the client does not hold are left out.
+// Heroes come and go, and a log string grows (sent as deltas). The run must end with the client
+// world equal to the server's (tests/net_e2e.rs).
+public enum EItem
+{
+    Sword,
+    Potion,
+    Gold
+}
+
+public struct SStat
+{
+    public int Uses;
+    public string Note;
+}
+
+public class Hero : Entity
+{
+    public int Id;
+    public mut Dictionary<EItem, int> Bag;
+    public mut Dictionary<string, SStat> Stats;
+    public mut Dictionary<Hero?, int> Damage;
+    public mut int Turn;
+    public mut string Log = "";
+
+    public void Update(float dt)
+    {
+        Turn += 1;
+        Log += "x";
+        if (Log.Length > 90)
+        {
+            Log = Log.Substring(40);
+        }
+        if (Turn == 1)
+        {
+            Bag[EItem.Gold] = 10;
+            Bag.Add(EItem.Potion, 3);
+        }
+        Bag[EItem.Gold] += Turn;
+        string key = $"t{(Turn + Id) % 5}";
+        mut SStat s;
+        if (Stats.TryGetValue(key, out s))
+        {
+            s.Uses += 1;
+            s.Note = s.Note + "+";
+            Stats[key] = s;
+        }
+        else
+        {
+            Stats[key] = new SStat { Uses = 1, Note = $"{key}·{Id}" };
+        }
+        if (Turn % 7 == 0)
+        {
+            Stats.Remove("t2");
+            Bag.Remove(EItem.Potion);
+        }
+        if (Turn % 11 == 0)
+        {
+            Bag[EItem.Potion] = Turn;
+        }
+        foreach (var other in Query<Hero>())
+        {
+            if (other != this)
+            {
+                Damage[other] = Damage.GetValueOrDefault(other) + 1;
+            }
+        }
+        if (Turn > 50 + Id % 4 * 10)
+        {
+            Spawn(new Hero { Id = Id + 4 });
+            Destroy();
+        }
+    }
+
+    public client void Render()
+    {
+        mut int stats = 0;
+        foreach (var kv in Stats)
+        {
+            stats += kv.Key.Length + kv.Value.Uses + kv.Value.Note.Length;
+        }
+        mut int damage = 0;
+        foreach (var kv in Damage)
+        {
+            if (kv.Key is Hero h)
+            {
+                damage += kv.Value + h.Turn;
+            }
+        }
+        int gold = Bag.GetValueOrDefault(EItem.Gold);
+        string first = Stats.TryGetValue("t0", out SStat t0) ? t0.Note : "-";
+        Draw.Text(Id, 0, $"{Bag.Count} {gold} {stats} {first} {damage}/{Damage.Count} {Log.Length}");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            Spawn(new Hero { Id = i });
+        }
+    }
+}

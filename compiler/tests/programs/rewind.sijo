@@ -1,0 +1,56 @@
+// Frame-arena rewinding: the first loop gives back each iteration's temporaries (memory stays
+// bounded); the string-building and list-growing loops must not rewind (their values outlive the
+// iteration). Results must not depend on it.
+public class Worker : Entity
+{
+    public mut int Score;
+    public mut string Tag = "";
+
+    public void Update(float dt)
+    {
+        mut int total = 0;
+        for (int i = 0; i < 2000; i++)
+        {
+            mut var tmp = new List<int>();
+            for (int k = 0; k < 10; k++)
+            {
+                tmp.Add(k * i);
+            }
+            string s = $"item {i} has {tmp.Count} values";
+            total += s.Length + tmp[3];
+        }
+        // must not rewind: the string outlives each iteration
+        mut string acc = "";
+        for (int i = 0; i < 50; i++)
+        {
+            acc += $"{i % 10}";
+        }
+        // must not rewind: an outer list grows
+        mut var keep = new List<string>();
+        for (int i = 0; i < 20; i++)
+        {
+            keep.Add($"k{i}");
+        }
+        Score = total + acc.Length + keep.Count;
+        Tag = acc.Substring(0, 5) + keep[19];
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            Spawn(new Worker());
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var w in Query<Worker>())
+        {
+            Print($"{Time.Tick} {w.Score} {w.Tag}");
+        }
+    }
+}

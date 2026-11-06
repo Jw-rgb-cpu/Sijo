@@ -1,0 +1,97 @@
+// Replicated lists and arrays: client code reads them, so their contents go to the clients as
+// canonical bytes (interned like strings, sent only when the contents change). They change in
+// place (Add, RemoveAt, element writes, Sort), are replaced, hold strings, structs with strings,
+// and other lists. The run must end with the client world equal to the server's.
+public struct SItem
+{
+    public string Name;
+    public float Weight;
+}
+
+public class Bag : Entity
+{
+    public int Id;
+    public mut List<int> Counts;
+    public mut int[] Slots = new int[4];
+    public mut List<string> Log;
+    public mut List<SItem> Items;
+    public mut List<List<int>> Grid;
+    public mut int Life;
+
+    public void Update(float dt)
+    {
+        Life--;
+        if (Time.Tick % 2 == Id % 2)
+        {
+            Counts.Add(Time.Tick * (Id + 1) % 17);
+        }
+        if (Counts.Count > 6)
+        {
+            Counts.RemoveAt(0);
+        }
+        Slots[Time.Tick % 4] = Time.Tick + Id;
+        if (Time.Tick % 5 == 0)
+        {
+            Log.Add($"t{Time.Tick}·{Id}");
+            if (Log.Count > 3)
+            {
+                Log.RemoveAt(0);
+            }
+            Counts.Sort();
+        }
+        if (Time.Tick % 7 == Id % 7)
+        {
+            Items.Add(new SItem { Name = $"item{Items.Count}", Weight = Time.Tick * 0.5f });
+            mut var row = new List<int>();
+            for (int i = 0; i <= Items.Count % 3; i++)
+            {
+                row.Add(i * Id);
+            }
+            Grid.Add(row);
+        }
+        if (Time.Tick % 23 == 0)
+        {
+            Items = new List<SItem>();
+            Grid.Clear();
+        }
+        if (Life <= 0)
+        {
+            Destroy();
+        }
+    }
+
+    public client void Render()
+    {
+        mut int total = 0;
+        foreach (var c in Counts)
+        {
+            total += c;
+        }
+        string last = Log.Count > 0 ? Log[Log.Count - 1] : "-";
+        mut int cells = 0;
+        foreach (var r in Grid)
+        {
+            cells += r.Count;
+        }
+        Draw.Text(Id, 0, $"{Counts.Count}:{total} {Slots[0]},{Slots[3]} {last} {Items.Count} {cells}");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            Spawn(new Bag { Id = i, Life = 40 + i * 13 });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 17 == 0)
+        {
+            Spawn(new Bag { Id = Time.Tick % 5, Life = 50 });
+        }
+    }
+}

@@ -1,0 +1,44 @@
+// [Persistent] fields: what a [PersistentKey] entity keeps in the store (--store DIR) across runs.
+// A destroyed and respawned entity takes its latest values within a run; a later run starts from
+// what the earlier one wrote (tests/e2e.rs).
+public class Player : Entity
+{
+    [PersistentKey] public string Account;
+    [Persistent] public mut int Gold = 10;
+    [Persistent] public mut List<string> Items;
+    [Persistent] public mut int in 0..100 Level = 1;
+    public mut int Seen;
+
+    public void Update(float dt)
+    {
+        Gold += 1;
+        Seen += 1;
+        if (Time.Tick % 3 == 0)
+        {
+            Items.Add($"loot{Time.Tick}");
+        }
+        if (Time.Tick == 5 && Account == "bob")
+        {
+            Destroy();
+        }
+    }
+}
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Player { Account = "ann" });
+        Spawn(new Player { Account = "bob", Gold = 50 });
+    }
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 7)
+        {
+            Spawn(new Player { Account = "bob" });
+        }
+        foreach (var p in Query<Player>())
+        {
+            Print($"t{Time.Tick} {p.Account} gold {p.Gold} items {p.Items.Count} level {p.Level} seen {p.Seen}");
+        }
+    }
+}

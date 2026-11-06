@@ -1,0 +1,15 @@
+a: xs=[1,20] i=1
+b: xs=[0,20] i=1
+c: calls=1 xs=[10,27]
+d: xs=[17,20] i=1
+e: xs[0]=99 count=102 enum=7 Green
+f: A B A B out: True 5 -12
+g: True False
+h: 9,5,4,1,7 2 -1 True False
+i: 1,4,5,7,9 9,7,5,4,1
+j: 1 True NaN NaN -Infinity -2 -0 0 3.5 |Apple|Banana|apple|pear
+range defaults: Hp=100 Speed=-1
+Wait(1): 60 ticks
+Wait(0.1): 6 ticks
+Wait(0.02): 2 ticks
+Wait(0): 1 ticks

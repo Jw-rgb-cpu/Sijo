@@ -1,0 +1,60 @@
+// Number formatting and parsing: the expected output (formatting.expected) is what .NET 8 prints
+// for the same C# code with CultureInfo.InvariantCulture. The runtime formats from the exact
+// binary value (no printf / strtof), so the text is the same on every platform and locale.
+public static class Game
+{
+    public static void Show(float v)
+    {
+        Print($"{v} | {v:F0} {v:F2} {v:F5} | {v:N2} {v:N0} | {v:E} {v:E2} {v:e0} | {v.ToString()}");
+        string s = $"[{v:F3}|{v:E1}|{v}]";
+        Print(s);
+    }
+
+    public static void ShowI(int v)
+    {
+        Print($"{v} | {v:D} {v:D5} {v:X} {v:x} {v:X8} | {v:F2} {v:N0} {v:N} | {v:E2} {v:E}");
+    }
+
+    public static void Start()
+    {
+        float zero = 0;
+        mut List<float> vs = new List<float>();
+        vs.Add(0); vs.Add(-zero); vs.Add(1); vs.Add(-1); vs.Add(0.1f); vs.Add(1.0f / 3.0f);
+        vs.Add(0.0001f); vs.Add(0.000015f); vs.Add(0.00001f); vs.Add(1e-10f); vs.Add(1e-45f);
+        vs.Add(10000000); vs.Add(100000000); vs.Add(1000000000); vs.Add(123456789); vs.Add(1.5e9f);
+        vs.Add(1e14f); vs.Add(1e15f); vs.Add(3.4028235e38f); vs.Add(-1234.5f); vs.Add(1234567.891f);
+        vs.Add(0.5f); vs.Add(1.5f); vs.Add(2.5f); vs.Add(0.125f); vs.Add(0.625f); vs.Add(0.0625f);
+        vs.Add(zero / zero); vs.Add(1 / zero); vs.Add(-1 / zero);
+        foreach (var v in vs)
+        {
+            Show(v);
+        }
+        mut List<int> xs = new List<int>();
+        xs.Add(0); xs.Add(42); xs.Add(-42); xs.Add(7); xs.Add(2147483647); xs.Add(-2147483647 - 1); xs.Add(1234567); xs.Add(-1);
+        foreach (var x in xs)
+        {
+            ShowI(x);
+        }
+        mut List<string> ps = new List<string>();
+        ps.Add(" 1.5 "); ps.Add("1,234.5"); ps.Add("-0"); ps.Add("1e-45"); ps.Add("NaN"); ps.Add("-Infinity");
+        ps.Add("3.4028236e38"); ps.Add("0.1"); ps.Add("1E+10"); ps.Add(".5"); ps.Add("12345678901234567890");
+        foreach (var p in ps)
+        {
+            float f = float.Parse(p);
+            Print($"parse '{p}' -> {f} {f:E8}");
+        }
+        mut float g;
+        mut bool ok = float.TryParse("abc", out g);
+        Print($"tryparse abc {ok} {g}");
+        ok = float.TryParse("1.2.3", out g);
+        Print($"tryparse 1.2.3 {ok}");
+        int i = int.Parse(" -42 ");
+        int j = int.Parse("+7");
+        Print($"int {i} {j}");
+        mut int k;
+        ok = int.TryParse("2147483648", out k);
+        Print($"tryparse big {ok} {k}");
+        ok = int.TryParse("-2147483648", out k);
+        Print($"tryparse min {ok} {k}");
+    }
+}

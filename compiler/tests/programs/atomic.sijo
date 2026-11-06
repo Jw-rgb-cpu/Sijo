@@ -1,0 +1,586 @@
+// Transactions: `fail` rolls back every change made in an atomic block: values, lists, arrays and
+// dictionaries (locals, `ref` parameters and fields of this, collections of collections), what
+// called methods change, deferred commands and spawns. `return`, `break` and `continue` leave a
+// block normally and keep its changes; an inner block's `fail` undoes the inner block only.
+// Run on 1 and 4 threads and under ASan/UBSan/LSan (what a rollback throws away is freed).
+public struct SPoint
+{
+    public int X;
+    public int Y;
+
+    public mut void Move(int d)
+    {
+        X += d;
+        Y -= d;
+    }
+}
+
+public static class Show
+{
+    public static string L(List<int> xs) => "[" + string.Join(",", xs) + "]";
+
+    public static string S(List<string> xs) => "[" + string.Join(",", xs) + "]";
+
+    public static string A(int[] xs) => "[" + string.Join(",", xs) + "]";
+
+    public static string G(List<List<int>> g)
+    {
+        mut string o = "";
+        foreach (var r in g)
+        {
+            o += L(r);
+        }
+        return "{" + o + "}";
+    }
+
+    public static string D(Dictionary<string, int> d)
+    {
+        mut string o = "";
+        foreach (var kv in d)
+        {
+            o += $"{kv.Key}={kv.Value};";
+        }
+        return "{" + o + "}";
+    }
+
+    public static string P(List<SPoint> ps)
+    {
+        mut string o = "";
+        foreach (var p in ps)
+        {
+            o += $"({p.X},{p.Y})";
+        }
+        return o;
+    }
+}
+
+public static class Locals
+{
+    public static void Push(ref List<int> xs, int v)
+    {
+        xs.Add(v);
+        xs.Sort();
+    }
+
+    public static void Bump(ref int x)
+    {
+        x += 1000;
+    }
+
+    public static void Make(out List<int> xs)
+    {
+        xs = new List<int> { 42 };
+    }
+
+    // every list operation on a local, rolled back by fail
+    public static void Lists()
+    {
+        mut var xs = new List<int> { 5, 3, 8 };
+        atomic { xs.Add(1); fail; }
+        atomic { xs.Add(1); xs.Add(2); fail; }
+        atomic { xs.Insert(0, 9); fail; }
+        atomic { xs.RemoveAt(1); fail; }
+        atomic { xs.Remove(8); fail; }
+        atomic { xs.Clear(); fail; }
+        atomic { xs.Sort(); fail; }
+        atomic { xs.Reverse(); fail; }
+        atomic { xs[0] = 100; fail; }
+        atomic { xs[1] += 7; fail; }
+        atomic { xs[2]++; fail; }
+        atomic { xs = new List<int> { 0 }; fail; }
+        atomic { xs.RemoveAll(x => x > 4); fail; }
+        atomic { xs.Sort((a, b) => b - a); fail; }
+        atomic { Push(ref xs, 4); fail; }
+        atomic { Bump(ref xs[0]); fail; }
+        atomic { Make(out xs); fail; }
+        atomic { xs.Add(7); xs.Sort(); xs.Add(0); fail; }
+        Print($"lists undone {Show.L(xs)}");
+        // the same changes without fail stay
+        atomic { xs.Add(1); xs.Insert(0, 9); xs.RemoveAt(1); xs.Remove(8); xs.Sort(); xs.Reverse(); xs[0] += 100; }
+        Print($"lists kept {Show.L(xs)}");
+        atomic { Push(ref xs, 4); Bump(ref xs[1]); xs.RemoveAll(x => x == 3); }
+        Print($"lists kept by calls {Show.L(xs)}");
+        atomic { Make(out xs); }
+        Print($"list replaced {Show.L(xs)}");
+    }
+
+    public static void Arrays()
+    {
+        mut int[] a = new int[] { 4, 2, 6 };
+        atomic { a[0] = 1; Array.Fill(a, 7); fail; }
+        atomic { Array.Sort(a); Array.Reverse(a); fail; }
+        atomic { a = new int[] { 1 }; fail; }
+        Print($"array undone {Show.A(a)}");
+        atomic { Array.Sort(a); a[2] *= 10; }
+        Print($"array kept {Show.A(a)}");
+    }
+
+    public static void Dictionaries()
+    {
+        mut var d = new Dictionary<string, int> { { "a", 1 }, { "b", 2 }, { "c", 3 } };
+        atomic { d["a"] = 10; fail; }
+        atomic { d["z"] = 26; fail; }
+        atomic { d.Add("y", 25); fail; }
+        atomic { d.Remove("a"); fail; }
+        atomic { d.Clear(); fail; }
+        atomic { d["b"] += 5; fail; }
+        atomic { d = new Dictionary<string, int>(); fail; }
+        atomic { d.Remove("a"); d["a"] = 7; d.Remove("c"); fail; }
+        Print($"dictionary undone {Show.D(d)} {d.Count} {d.ContainsKey("z")} {d["c"]}");
+        atomic { d.Remove("a"); d["d"] = 4; d["b"] += 5; }
+        Print($"dictionary kept {Show.D(d)} {d.Count} {d.ContainsKey("a")}");
+    }
+
+    // collections of collections: the copy is deep, element lists are freed on the way
+    public static void Nested()
+    {
+        mut var g = new List<List<int>> { new List<int> { 1, 2 }, new List<int> { 3 } };
+        atomic { g.Add(new List<int> { 4, 5 }); fail; }
+        atomic { g[0].Add(9); fail; }
+        atomic { g[1][0] = 30; fail; }
+        atomic { g.RemoveAt(0); fail; }
+        atomic { g.Clear(); fail; }
+        atomic { g[0] = new List<int> { 7 }; fail; }
+        atomic { g.Insert(1, new List<int>()); g[1].Add(6); fail; }
+        atomic { g.Add(new List<int> { 4 }); g[2].Add(5); g.Reverse(); fail; }
+        Print($"nested undone {Show.G(g)}");
+        atomic { g.Add(new List<int> { 4, 5 }); g[0].Add(9); g[1][0] = 30; g.RemoveAt(1); }
+        Print($"nested kept {Show.G(g)}");
+        mut var ps = new List<SPoint> { new SPoint { X = 1, Y = 1 }, new SPoint { X = 2, Y = 2 } };
+        atomic { ps[0].Move(5); ps[1].X = 0; fail; }
+        Print($"struct elements undone {Show.P(ps)}");
+        atomic { ps[0].Move(5); }
+        Print($"struct elements kept {Show.P(ps)}");
+        mut var names = new List<string> { "ann", "bob" };
+        atomic { names.Add($"c{g.Count}"); names[0] = names[0] + "!"; names.Sort(); fail; }
+        Print($"strings undone {Show.S(names)}");
+        atomic { names.Insert(0, $"z{g.Count}"); names[1] = names[1] + "?"; }
+        Print($"strings kept {Show.S(names)}");
+    }
+
+    // an inner fail undoes the inner block; an outer fail undoes both
+    public static void Nesting()
+    {
+        mut var xs = new List<int> { 1 };
+        mut int n = 0;
+        atomic
+        {
+            xs.Add(2);
+            n += 1;
+            atomic
+            {
+                xs.Sort();
+                xs.Add(3);
+                n += 10;
+                fail;
+            }
+            xs.Add(4);
+        }
+        Print($"inner fail {Show.L(xs)} {n}");
+        atomic
+        {
+            xs.Add(5);
+            atomic
+            {
+                xs.Reverse();
+                n += 100;
+            }
+            atomic
+            {
+                xs.RemoveAt(0);
+                atomic
+                {
+                    xs.Clear();
+                    fail;
+                }
+            }
+            fail;
+        }
+        Print($"outer fail {Show.L(xs)} {n}");
+        // the inner block copied first: its copy becomes the outer block's
+        atomic
+        {
+            atomic
+            {
+                xs.Reverse();
+            }
+            xs.Add(6);
+            fail;
+        }
+        Print($"copy handed outward {Show.L(xs)}");
+        // appends inside, other changes outside
+        atomic
+        {
+            atomic
+            {
+                xs.Add(7);
+                atomic
+                {
+                    xs.Add(8);
+                    fail;
+                }
+            }
+            xs.Sort();
+            if (xs.Count > 2)
+            {
+                fail;
+            }
+        }
+        Print($"marks inside copies {Show.L(xs)}");
+        atomic
+        {
+            atomic
+            {
+                xs.Add(7);
+            }
+            xs.Sort();
+        }
+        Print($"marks inside copies kept {Show.L(xs)}");
+    }
+
+    // return commits every block it leaves (also with a value); fail before it still undoes
+    public static int Returns(mut own List<int> xs, int k)
+    {
+        atomic
+        {
+            xs.Add(k);
+            atomic
+            {
+                xs.Sort();
+                if (k > 5)
+                {
+                    return xs.Count * 100 + xs[0];
+                }
+                if (k < 0)
+                {
+                    fail;
+                }
+            }
+            if (k == 0)
+            {
+                return xs[xs.Count - 1];
+            }
+            fail;
+        }
+        return xs.Count;
+    }
+
+    public static void Flow()
+    {
+        Print($"return {Returns(new List<int> { 3, 1 }, 9)} {Returns(new List<int> { 3, 1 }, 0)} {Returns(new List<int> { 3, 1 }, -1)} {Returns(new List<int> { 3, 1 }, 2)}");
+        mut var xs = new List<int>();
+        mut int sum = 0;
+        for (int i = 0; i < 6; i++)
+        {
+            atomic
+            {
+                xs.Add(i);
+                sum += i;
+                if (i == 1)
+                {
+                    continue;
+                }
+                if (i == 4)
+                {
+                    break;
+                }
+                xs.Sort();
+                if (i % 2 == 0)
+                {
+                    fail;
+                }
+            }
+        }
+        Print($"break and continue keep {Show.L(xs)} {sum}");
+        // these loops allocate frame memory (the strings) but do not give it back each iteration:
+        // the undo log's copy of xs is made inside them
+        mut string tag = "";
+        atomic
+        {
+            tag = "changed";
+            for (int i = 0; i < 3; i++)
+            {
+                string s = $"<{i}>" + new string('*', i * 20);
+                xs.Reverse();
+                xs[0] += s.Length + i;
+            }
+            fail;
+        }
+        Print($"loop in atomic {Show.L(xs)} '{tag}'");
+        for (int i = 0; i < 3; i++)
+        {
+            string s = $"<{i}>";
+            atomic
+            {
+                xs.Reverse();
+                xs[0] += s.Length * 10;
+                if (i != 1)
+                {
+                    fail;
+                }
+            }
+        }
+        Print($"atomic in loop {Show.L(xs)}");
+        switch (xs.Count)
+        {
+            case 3:
+                atomic
+                {
+                    xs.Add(xs[0]);
+                    if (xs[0] > 100)
+                    {
+                        fail;
+                    }
+                    break;
+                }
+                break;
+            default:
+                break;
+        }
+        Print($"break out of a switch {Show.L(xs)} last {Last(new List<int> { 4, 9, 2 })}");
+    }
+
+    // a block that cannot fail always returns: no return after it
+    public static int Last(mut own List<int> xs)
+    {
+        atomic
+        {
+            xs.Sort();
+            return xs[xs.Count - 1];
+        }
+    }
+}
+
+public class Bag : Entity
+{
+    public mut List<int> Items;
+    public int Owner;
+}
+
+public class Ping : Entity
+{
+    public mut int Got;
+
+    public void Hit(int n)
+    {
+        Got += n;
+    }
+}
+
+// fields of this: lists, arrays, dictionaries, collections of collections, changed directly and by
+// methods; spawns (with lists) and messages of a failed block are dropped
+public class Shop : Entity
+{
+    public mut int Gold = 10;
+    public mut List<int> Stock;
+    public mut int[] Slots = new int[3];
+    public mut Dictionary<string, int> Prices;
+    public mut List<List<int>> Shelves;
+    public mut List<string> Log;
+    public Ping? Peer;
+
+    void Restock(int n)
+    {
+        Stock.Add(n);
+        Stock.Sort();
+        Shelves.Add(new List<int> { n, n });
+    }
+
+    bool Buy(int item)
+    {
+        atomic
+        {
+            if (!Stock.Remove(item))
+            {
+                fail;
+            }
+            Gold -= Prices[$"p{item}"];
+            Prices[$"p{item}"] += 1;
+            Log.Add($"buy {item}");
+            Spawn(new Bag { Items = new List<int> { item }, Owner = Gold });
+            if (Peer is Ping p)
+            {
+                p.Hit(item);
+            }
+            if (Gold < 0)
+            {
+                fail;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            Stock.Add(3);
+            Stock.Add(5);
+            Stock.Add(8);
+            Prices["p3"] = 3;
+            Prices["p5"] = 5;
+            Prices["p8"] = 8;
+            Shelves.Add(new List<int> { 1 });
+        }
+        atomic
+        {
+            Restock(Time.Tick * 10);
+            Slots[Time.Tick % 3] = Time.Tick;
+            Shelves[0].Add(Time.Tick);
+            Log.Add($"tick {Time.Tick}");
+            Gold += Time.Tick * 2;
+            if (Time.Tick % 2 == 0)
+            {
+                fail;
+            }
+        }
+        bool ok = Buy(Time.Tick == 1 ? 8 : Time.Tick == 2 ? 5 : 3);
+        mut int n = 0;
+        foreach (var s in Shelves)
+        {
+            n += s.Count;
+        }
+        Print($"shop {Time.Tick}: {ok} gold {Gold} stock {Show.L(Stock)} slots {Show.A(Slots)} shelves {Shelves.Count}/{n} log {Log.Count} prices {Show.D(Prices)}");
+    }
+}
+
+// a coroutine: atomic blocks between awaits, on a local kept across awaits and on a field
+public class Walker : Entity
+{
+    public mut List<int> Path;
+    public mut int Steps;
+
+    public async void Run()
+    {
+        mut var seen = new List<int> { 0 };
+        for (int k = 1; k <= 3; k++)
+        {
+            atomic
+            {
+                seen.Add(k);
+                seen.Reverse();
+                Path.Add(k * 2);
+                Steps += 1;
+                if (k == 2)
+                {
+                    fail;
+                }
+            }
+            await NextTick();
+        }
+        Print($"walker {Show.L(seen)} {Show.L(Path)} {Steps}");
+    }
+}
+
+public class Sink : Entity
+{
+    public mut int Total;
+}
+
+public class Token : Entity
+{
+    public int From;
+    public mut List<int> Marks;
+}
+
+// many entities: a parallel system (per-thread command buffers; the helper's spawns go to
+// per-thread tables, and a failed block drops its rows there)
+public class Trader : Entity
+{
+    public int Id;
+    public mut int Coins;
+    public mut List<int> Goods;
+    public mut Dictionary<int, int> Seen;
+    public Sink? Peer;
+
+    void Deal()
+    {
+        Spawn(new Token { From = Id, Marks = new List<int> { Id, Id } });
+    }
+
+    public void Update(float dt)
+    {
+        atomic
+        {
+            Goods.Add(Id + Time.Tick);
+            Seen[Time.Tick % 4] = Id;
+            Coins += Id % 7;
+            Deal();
+            if (Peer is Sink s)
+            {
+                s.Total += 1;
+            }
+            if ((Id + Time.Tick) % 3 == 0)
+            {
+                Goods.Sort();
+                fail;
+            }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        var sink = Spawn(new Sink { });
+        for (int i = 0; i < 600; i++)
+        {
+            Spawn(new Trader { Id = i, Peer = sink });
+        }
+        Locals.Lists();
+        Locals.Arrays();
+        Locals.Dictionaries();
+        Locals.Nested();
+        Locals.Nesting();
+        Locals.Flow();
+        var p = Spawn(new Ping { });
+        Spawn(new Shop { Peer = p });
+        Spawn(new Walker { });
+    }
+
+    public static void Update(float dt)
+    {
+        mut int bags = 0;
+        mut int items = 0;
+        foreach (var b in Query<Bag>())
+        {
+            bags += 1;
+            items += b.Items[0] * 100 + b.Owner;
+        }
+        mut int got = 0;
+        foreach (var p in Query<Ping>())
+        {
+            got += p.Got;
+        }
+        Print($"world {Time.Tick}: bags {bags} {items} pings {got}");
+        mut int coins = 0;
+        mut int goods = 0;
+        mut int order = 0;
+        mut int seen = 0;
+        foreach (var t in Query<Trader>())
+        {
+            coins += t.Coins;
+            goods += t.Goods.Count;
+            for (int j = 0; j < t.Goods.Count; j++)
+            {
+                order += t.Goods[j] * (j + 1);
+            }
+            seen += t.Seen.Count;
+        }
+        mut int tokens = 0;
+        mut int from = 0;
+        foreach (var k in Query<Token>())
+        {
+            tokens += 1;
+            from += k.From + k.Marks.Count;
+        }
+        mut int total = 0;
+        foreach (var s in Query<Sink>())
+        {
+            total += s.Total;
+        }
+        Print($"traders {Time.Tick}: coins {coins} goods {goods} {order} seen {seen} tokens {tokens} {from} sink {total}");
+    }
+}

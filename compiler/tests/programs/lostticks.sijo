@@ -1,0 +1,46 @@
+// Client code that acts on particular ticks (an input every 10 ticks): with snapshots lost, the client
+// still runs one client frame per server tick, the lost ones on values interpolated between the
+// snapshots around them, so no input is skipped (tests/net_e2e.rs).
+public class Pad : Entity
+{
+    public mut int Hits;
+    public mut float X;
+
+    public void Update(float dt)
+    {
+        X += 1;
+    }
+
+    public void Press(int t)
+    {
+        Hits += 1;
+    }
+
+    public client void Input()
+    {
+        if (Time.Tick % 10 == 0)
+        {
+            Press(Time.Tick);
+        }
+        Draw.Sprite(1, X, 0);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Pad());
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 600)
+        {
+            foreach (var p in Query<Pad>())
+            {
+                Print($"hits {p.Hits}");
+            }
+        }
+    }
+}

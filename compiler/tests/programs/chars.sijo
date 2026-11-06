@@ -1,0 +1,160 @@
+// char: literals and escapes, s[i] (O(1) for ASCII text), foreach over a string, conversions,
+// char.Is*/To*, switch on chars, chars in lists, dictionaries, entity state and interpolation,
+// string methods that take chars, Split/PadLeft/PadRight/LastIndexOf, new string(c, n),
+// Unicode-aware ToUpper/ToLower/Trim. Expected output: the same program in C# (.NET 8).
+public enum EKind
+{
+    Letter,
+    Digit,
+    Space,
+    Other
+}
+
+public static class Text
+{
+    public const char SEP = ',';
+
+    public static EKind Kind(char c) => c switch
+    {
+        >= 'a' and <= 'z' or >= 'A' and <= 'Z' => EKind.Letter,
+        >= '0' and <= '9' => EKind.Digit,
+        ' ' or '\t' => EKind.Space,
+        _ => EKind.Other
+    };
+
+    public static int Digits(string s)
+    {
+        mut int n = 0;
+        foreach (char c in s)
+        {
+            if (char.IsDigit(c))
+            {
+                n = n * 10 + (c - '0');
+            }
+        }
+        return n;
+    }
+
+    public static string Caesar(string s, int k)
+    {
+        mut string o = "";
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c >= 'a' && c <= 'z')
+            {
+                o += (char)('a' + (c - 'a' + k) % 26);
+            }
+            else
+            {
+                o += c;
+            }
+        }
+        return o;
+    }
+
+    public static string Reverse(string s)
+    {
+        mut string o = "";
+        foreach (char c in s)
+        {
+            o = c + o;
+        }
+        return o;
+    }
+}
+
+public class Typist : Entity
+{
+    public mut char Last = 'a';
+    public mut int Typed;
+    public mut string Line = "";
+
+    public void Update(float dt)
+    {
+        Last = (char)(Last + 1);
+        if (Last > 'z')
+        {
+            Last = 'a';
+        }
+        Typed++;
+        if (Typed % 5 == 0)
+        {
+            Line += Last;
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        char a = 'A';
+        char nl = '\n';
+        char q = '\'';
+        char u = 'é';
+        char h = '한';
+        Print($"{a} {(int)a} {(int)nl} {q} {u} {h} {(int)h}");
+        Print($"{a + 1} {(char)(a + 1)} {'z' - 'a'} {a == 'A'} {a < 'B'} {char.MaxValue == '￿'}");
+        string s = "Hello, 세계! 123";
+        Print($"{s.Length} {s[0]} {s[7]} {s[s.Length - 1]} {Text.Digits(s)}");
+        mut int letters = 0;
+        mut int others = 0;
+        foreach (var c in s)
+        {
+            if (char.IsLetter(c))
+            {
+                letters++;
+            }
+            else
+            {
+                others++;
+            }
+        }
+        Print($"letters={letters} others={others}");
+        Print($"{Text.Kind('q')} {Text.Kind('7')} {Text.Kind(' ')} {Text.Kind('#')}");
+        Print($"{char.IsUpper('A')} {char.IsLower('A')} {char.ToUpper('q')} {char.ToLower('Q')} {char.IsWhiteSpace('\t')} {char.IsPunctuation('!')} {char.IsPunctuation('+')} {char.IsLetterOrDigit('_')}");
+        Print($"{char.ToUpper('é')} {char.ToLower('Ä')} {char.IsUpper('Ω')} {char.ToUpper('ω')} {char.ToLower('Ж')} {char.IsLetter('가')} {char.IsDigit('٣')}");
+        Print(Text.Caesar("hello world", 3));
+        Print(Text.Reverse("abc가나"));
+        Print($"{s.IndexOf('l')} {s.LastIndexOf('l')} {s.Contains('세')} {s.StartsWith('H')} {s.Replace('l', 'L')}");
+        List<string> parts = "a,b,,c".Split(Text.SEP);
+        Print($"{parts.Count} [{string.Join("|", parts)}]");
+        List<string> words = "one  two three".Split(" ");
+        Print($"{words.Count} {words[2]}");
+        Print($"[{"7".PadLeft(3)}] [{"7".PadLeft(3, '0')}] [{"ab".PadRight(4, '.')}] [{new string('=', 5)}] [{new string('가', 2)}]");
+        Print($"[{"  \t mixed Ünïcode ÿ ı \n".Trim()}] {"straße ÿ".ToUpper()} {"ÀÉÎ ΣΑΣ Ж".ToLower()}");
+        mut List<char> cs = new List<char>();
+        foreach (char c in "zebra")
+        {
+            cs.Add(c);
+        }
+        cs.Sort();
+        Print(string.Join("", cs));
+        mut Dictionary<char, int> freq = new Dictionary<char, int>();
+        foreach (char c in "mississippi")
+        {
+            freq[c] = freq.GetValueOrDefault(c) + 1;
+        }
+        Print($"s={freq['s']} i={freq['i']} p={freq['p']} m={freq['m']} keys={freq.Count}");
+        string ascii = "abcdefghij";
+        mut int sum = 0;
+        for (int i = 0; i < ascii.Length; i++)
+        {
+            sum += ascii[i];
+        }
+        Print($"{sum} {ascii.Substring(3, 4)} {(char)97} {'a'.CompareTo('c')} {'b'.Equals('b')} {'x'.ToString()}");
+        Spawn(new Typist());
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 20 == 0)
+        {
+            foreach (var t in Query<Typist>())
+            {
+                Print($"tick {Time.Tick}: last={t.Last} line={t.Line}");
+            }
+        }
+    }
+}

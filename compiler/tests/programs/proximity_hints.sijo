@@ -1,0 +1,75 @@
+// Distance loops the compiler cannot turn into a spatial grid, each with the reason and the fix
+// lint L402 suggests (tests/tooling.rs): the other entity's radius, a statement before the distance
+// test, and a loop in a method no system calls on `this` (the helper Update calls, countClose, is
+// accelerated: Update builds its grid).
+public struct SVec2
+{
+    public float X;
+    public float Y;
+    public SVec2(float x, float y) { X = x; Y = y; }
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public float LengthSq => X * X + Y * Y;
+}
+
+public class Unit : Entity
+{
+    public SVec2 Pos;
+    // mut: tests/tooling.rs also compiles a variant whose Update changes Range
+    // sijo-lint: disable-next-line L316
+    public mut float Range;
+    public mut int Near;
+    public mut int Seen;
+
+    public void Update(float dt)
+    {
+        Near = 0;
+        foreach (var o in Query<Unit>())
+        {
+            if ((o.Pos - Pos).LengthSq < o.Range * o.Range)
+            {
+                Near++;
+            }
+        }
+        foreach (var o in Query<Unit>())
+        {
+            Seen++;
+            if ((o.Pos - Pos).LengthSq < 4)
+            {
+                Near++;
+            }
+        }
+        countClose();
+    }
+
+    public int Crowd()
+    {
+        mut int n = 0;
+        foreach (var o in Query<Unit>())
+        {
+            if ((o.Pos - Pos).LengthSq < 25)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    void countClose()
+    {
+        foreach (var o in Query<Unit>())
+        {
+            if ((o.Pos - Pos).LengthSq < 9)
+            {
+                Near++;
+            }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Unit { Range = 2 });
+    }
+}

@@ -1,0 +1,62 @@
+// Replicated strings: client code reads string fields (and a struct holding one), so the server
+// sends them: an interned id per distinct value, plus the text whenever the value changes. Names
+// change every few ticks (sometimes back to an earlier value), some are empty, some are not ASCII;
+// labels are spawned and destroyed. The client draws them; the run must end with the client world
+// equal to the server's (replication check, state hash).
+public struct STag
+{
+    public string Text;
+    public int Level;
+}
+
+public class Label : Entity
+{
+    public int Id;
+    public mut float X;
+    public mut string Name = "";
+    public mut STag Tag;
+    public mut int Life;
+
+    public void Update(float dt)
+    {
+        X += 0.25f;
+        Life--;
+        if (Time.Tick % 3 == Id % 3)
+        {
+            string[] words = { "alpha", "", "베타", "gamma", "δέλτα", "alpha" };
+            Name = words[(Time.Tick / 3 + Id) % words.Length];
+        }
+        if (Time.Tick % 7 == 0)
+        {
+            Tag = new STag { Text = $"L{Id}x{Time.Tick % 4}", Level = Tag.Level + 1 };
+        }
+        if (Life <= 0)
+        {
+            Destroy();
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Text(X, Id, $"{Name}|{Tag.Text}|{Tag.Level}");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            Spawn(new Label { Id = i, Name = $"start{i}", Life = 20 + i * 7 });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 11 == 0)
+        {
+            Spawn(new Label { Id = Time.Tick % 6, Name = $"late {Time.Tick} ✓", Life = 30 });
+        }
+    }
+}

@@ -1,0 +1,206 @@
+// Replicated collections of entity references: client code reads lists, arrays, lists of structs,
+// nested lists and dictionaries that hold references. Every element travels as a server slot +
+// generation and the client maps it to its own handle once the whole snapshot is applied (targets
+// spawned by the same snapshot included), again whenever entities come or go: an element whose
+// target died reads as null, and a dictionary entry whose key died is dropped. Ships keep dying
+// and their slots are reused by new ships (the generation tells them apart), a predicted RPC edits
+// a list of references on the client, and a list of references shares its component with a field
+// that changes every tick. The run must end with the client world equal to the
+// server's (tests/net_e2e.rs).
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public struct SLink
+{
+    public Ship? To;
+    public int Weight;
+}
+
+public class Ship : Entity
+{
+    public mut SVec2 in 0..100 Pos;
+    public int Id;
+    public mut int Hp = 24;
+    public mut List<Ship?> Targets;
+    public mut Ship?[] Wing = new Ship?[3];
+    public mut List<SLink> Links;
+    public mut List<List<Ship?>> Squads;
+    public mut Dictionary<Ship?, int> Threat;
+    public mut Dictionary<int, Ship?> ByRank;
+    // one component for both: Sorties changes every tick, Escort only now and then
+    [Component("Flight")] public mut int Sorties;
+    [Component("Flight")] public mut List<Ship?> Escort;
+
+    public void Update(float dt)
+    {
+        // retarget every few ticks: the next three ships by id (wrapping), so references change often
+        if (Time.Tick % 5 == Id % 5)
+        {
+            mut var others = new List<Ship>();
+            foreach (var s in Query<Ship>())
+            {
+                if (s != this)
+                {
+                    others.Add(s);
+                }
+            }
+            others.Sort((a, b) => (a.Id - Id + 1000) % 1000 - (b.Id - Id + 1000) % 1000);
+            Targets.Clear();
+            for (int i = 0; i < Math.Min(3, others.Count); i++)
+            {
+                Targets.Add(others[i]);
+            }
+            if (Targets.Count > 0)
+            {
+                Wing[Time.Tick % 3] = Targets[0];
+                Links.Add(new SLink { To = Targets[Targets.Count - 1], Weight = Time.Tick % 11 });
+                mut var squad = new List<Ship?>();
+                foreach (var t in Targets)
+                {
+                    squad.Add(t);
+                }
+                squad.Add(this);
+                Squads.Add(squad);
+            }
+            if (Links.Count > 5)
+            {
+                Links.RemoveAt(0);
+            }
+            if (Squads.Count > 3)
+            {
+                Squads.RemoveAt(0);
+            }
+        }
+        foreach (var t in Targets)
+        {
+            if (t is Ship s)
+            {
+                Threat[s] = Threat.GetValueOrDefault(s) + 1;
+                ByRank[s.Id % 4] = s;
+            }
+        }
+        if (Targets.Count > 0 && Targets[0] is Ship victim)
+        {
+            victim.Hp -= 1;
+        }
+        if (Time.Tick % 9 == 0)
+        {
+            Threat.Remove(Wing[0]);
+        }
+        Sorties++;
+        if (Time.Tick % 7 == Id % 7)
+        {
+            Escort.Clear();
+            Escort.Add(Wing[0]);
+            Escort.Add(Wing[2]);
+        }
+        Pos = new SVec2((Pos.X + 0.6) % 100, (Pos.Y + 0.2 * (Id % 5)) % 100);
+        if (Hp <= 0)
+        {
+            Spawn(new Ship { Id = Id + 12, Pos = new SVec2(Id % 100, (Id * 7) % 100) });
+            Destroy();
+        }
+    }
+
+    // client input: drop the last target. Drop reads only replicated state and changes only this
+    // ship, so the client predicts it at once and puts the snapshot's list back when the server's
+    // answer arrives (the references in it are mapped again)
+    public client void Input()
+    {
+        if (Time.Tick % 13 == Id % 13 && Targets.Count > 1)
+        {
+            Drop();
+        }
+    }
+
+    public void Drop()
+    {
+        if (Targets.Count > 1)
+        {
+            Targets.RemoveAt(Targets.Count - 1);
+        }
+    }
+
+    public client void Render()
+    {
+        mut int seen = 0;
+        mut int ids = 0;
+        foreach (var t in Targets)
+        {
+            if (t is Ship s)
+            {
+                seen++;
+                ids += s.Id;
+            }
+        }
+        foreach (var w in Wing)
+        {
+            if (w is Ship s)
+            {
+                ids += s.Hp;
+            }
+        }
+        foreach (var l in Links)
+        {
+            if (l.To is Ship s)
+            {
+                ids += l.Weight * s.Id;
+            }
+        }
+        foreach (var q in Squads)
+        {
+            foreach (var m in q)
+            {
+                if (m is Ship s)
+                {
+                    seen += s.Id % 2 + 1;
+                }
+            }
+        }
+        mut int threat = 0;
+        foreach (var kv in Threat)
+        {
+            if (kv.Key is Ship s)
+            {
+                threat += kv.Value * (s.Id % 3 + 1);
+            }
+        }
+        mut int ranks = 0;
+        foreach (var kv in ByRank)
+        {
+            if (kv.Value is Ship s)
+            {
+                ranks += s.Id;
+            }
+        }
+        if (Targets.Count > 0 && Targets[0] is Ship first && Threat.TryGetValue(first, out int n))
+        {
+            threat += n;
+        }
+        foreach (var e in Escort)
+        {
+            ranks += e is Ship s ? s.Id * Sorties % 7 : 0;
+        }
+        Draw.Text(Pos.X, Pos.Y, $"{Id}: {seen} {ids} {threat} {ranks}");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 12; i++)
+        {
+            Spawn(new Ship { Id = i, Pos = new SVec2(i * 7, i * 3) });
+        }
+    }
+}

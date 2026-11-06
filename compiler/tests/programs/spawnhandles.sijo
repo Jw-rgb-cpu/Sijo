@@ -1,0 +1,93 @@
+// Parallel systems that use the handles they spawn: Spawn returns a provisional handle inside the
+// parallel region; after the per-thread tables are merged (row order = serial order), the fields
+// of `this` that hold one and the targets of queued commands are patched to the final handles.
+// Every result (ids included) must equal the serial run.
+public class Spark : Entity
+{
+    public mut int Life;
+    public mut int Value;
+
+    public void Update(float dt)
+    {
+        Life -= 1;
+        if (Life <= 0)
+        {
+            Destroy();
+        }
+    }
+
+    public void Bump(int by)
+    {
+        Value += by;
+    }
+}
+
+public class Keeper : Entity
+{
+    public int Id;
+    public mut Spark? Last;
+    public mut Spark? Prev;
+    public mut int Same;
+    public mut int Alive;
+
+    public void Update(float dt)
+    {
+        if (Last is Spark old)
+        {
+            Alive += 1;
+            old.Bump(Id);
+        }
+        Prev = Last;
+        if ((Time.Tick + Id) % 3 != 0)
+        {
+            Last = Spawn(new Spark { Life = 2 + Id % 4, Value = Id });
+        }
+        var temp = Spawn(new Spark { Life = 1, Value = -Id });
+        if (temp is Spark t)
+        {
+            t.Value = 5;                // never: an entity spawned in this system is not live yet
+        }
+        if (temp == Last || temp == Prev)
+        {
+            Same += 1000;
+        }
+        if (Prev == Last)
+        {
+            Same += 1;
+        }
+        if (Id % 7 == 0 && Prev is Spark p)
+        {
+            Destroy(p);
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 300; i++)
+        {
+            Spawn(new Keeper { Id = i });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 10 == 0)
+        {
+            mut int h = 0;
+            foreach (var k in Query<Keeper>())
+            {
+                int last = k.Last is Spark s ? s.Value : -1;
+                h = h * 31 + k.Same * 7 + k.Alive * 13 + last;
+            }
+            mut int sv = 0;
+            foreach (var s in Query<Spark>())
+            {
+                sv = sv * 17 + s.Value;
+            }
+            Print($"tick {Time.Tick}: sparks={Count<Spark>()} h={h} sv={sv}");
+        }
+    }
+}

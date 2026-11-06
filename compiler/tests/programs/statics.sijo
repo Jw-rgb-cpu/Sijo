@@ -1,0 +1,126 @@
+// Generic static classes (one set of functions and constants per type argument) and static
+// interface members: `static abstract` methods every implementing type provides, reached through
+// a type parameter (`T.Zero()`), and static helpers of the interface itself (`IShape.Unit()`)
+// (tests/e2e.rs, expected output in statics.expected).
+public interface INum<T>
+{
+    static abstract T Zero();
+    static abstract T Add(T a, T b);
+    static abstract string Name();
+    T Twice();
+}
+
+public interface IShape
+{
+    float Area();
+    // a function of the interface itself
+    static float Total(List<SCircle> cs)
+    {
+        mut float sum = 0;
+        foreach (var c in cs)
+        {
+            sum += c.Area();
+        }
+        return sum;
+    }
+}
+
+public struct SMoney : INum<SMoney>
+{
+    public int Cents;
+    public static SMoney Zero() => new SMoney { Cents = 0 };
+    public static SMoney Add(SMoney a, SMoney b) => new SMoney { Cents = a.Cents + b.Cents };
+    public static string Name() => "money";
+    public SMoney Twice() => new SMoney { Cents = Cents * 2 };
+}
+
+public struct SVec : INum<SVec>
+{
+    public float X;
+    public float Y;
+    public static SVec Zero() => new SVec { X = 0, Y = 0 };
+    public static SVec Add(SVec a, SVec b) => new SVec { X = a.X + b.X, Y = a.Y + b.Y };
+    public static string Name() => "vec";
+    public SVec Twice() => Add(this, this);
+}
+
+public struct SCircle : IShape
+{
+    public float R;
+    public float Area() => 3 * R * R;
+}
+
+// one instance per type argument: Pair<int>.Swap and Pair<string>.Swap are separate functions
+public static class Pairs<T>
+{
+    public const int Arity = 2;
+    public static T First(List<T> xs) => xs[0];
+    public static T Last(List<T> xs) => xs[xs.Count - 1];
+    public static own List<T> Swap(List<T> xs)
+    {
+        mut var out0 = new List<T>();
+        out0.Add(Last(xs));
+        out0.Add(First(xs));
+        return out0;
+    }
+}
+
+public static class Limits<T>
+{
+    public const T Default = default(T);
+    public static T Pick(bool first, T a, T b) => first ? a : b;
+}
+
+public static class Math2
+{
+    public static T Sum<T>(List<T> xs) where T : INum<T>
+    {
+        mut T acc = T.Zero();
+        foreach (var x in xs)
+        {
+            acc = T.Add(acc, x);
+        }
+        return acc;
+    }
+
+    public static string Describe<T>(T x) where T : INum<T> => $"{T.Name()}";
+}
+
+public class Wallet : Entity
+{
+    public mut List<SMoney> Coins;
+    public mut int Total;
+
+    public void Update(float dt)
+    {
+        Coins.Add(new SMoney { Cents = Time.Tick * 10 });
+        Total = Math2.Sum(Coins).Twice().Cents;
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        var ints = new List<int> { 1, 2, 3 };
+        var words = new List<string> { "a", "b" };
+        var sw = Pairs<int>.Swap(ints);
+        var ws = Pairs<string>.Swap(words);
+        Print($"pairs {sw[0]} {sw[1]} {ws[0]}{ws[1]} arity {Pairs<int>.Arity} {Pairs<string>.First(words)}");
+        Print($"limits '{Limits<int>.Default}' '{Limits<string>.Default}' {Limits<float>.Pick(false, 1.5f, 2.5f)}");
+        var vs = new List<SVec> { new SVec { X = 1, Y = 2 }, new SVec { X = 3, Y = 4 } };
+        var total = Math2.Sum(vs);
+        Print($"sum vec {total.X} {total.Y} {Math2.Describe(total)} {Math2.Describe(new SMoney())}");
+        var cs = new List<SCircle> { new SCircle { R = 1 }, new SCircle { R = 2 } };
+        Print($"area {IShape.Total(cs)}");
+        Spawn(new Wallet());
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var w in Query<Wallet>())
+        {
+            Print($"t{Time.Tick} wallet {w.Total}");
+        }
+    }
+}

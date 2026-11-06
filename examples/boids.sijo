@@ -1,0 +1,134 @@
+// boids.sijo — flocking. Every boid reads its neighbours and writes itself.
+//
+// In a naive parallel implementation this is a data race (or order-dependent
+// Gauss-Seidel updates). The compiler detects the hazard (Pos/Vel written on
+// `this` and read on other entities in the same system) and double-buffers
+// exactly those components, so the system runs data-parallel and the result
+// is bit-identical for any thread count.
+
+using Sijo;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public float LengthSq => X * X + Y * Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+}
+
+public static class Flock
+{
+    public const float WORLD = 200;
+    public const float VIEW_RADIUS = 12;
+    public const float MAX_SPEED = 30;
+    public const float VIEW_SQ = VIEW_RADIUS * VIEW_RADIUS;
+
+    public static SVec2 Limit(SVec2 vec, float max)
+    {
+        float l2 = vec.LengthSq;
+        if (l2 > max * max)
+        {
+            return vec * (max / Math.Sqrt(l2));
+        }
+        return vec;
+    }
+}
+
+public class Boid : Entity
+{
+    [Precision(0.05)] public mut SVec2 in 0..200 Pos;
+    public mut SVec2 Vel;
+    public mut int Neighbours;
+
+    public void Update(float dt)
+    {
+        mut SVec2 center = new SVec2(0, 0);
+        mut SVec2 align = new SVec2(0, 0);
+        mut SVec2 away = new SVec2(0, 0);
+        mut int count = 0;
+        foreach (var other in Query<Boid>())
+        {
+            if (other == this)
+            {
+                continue;
+            }
+            SVec2 offset = other.Pos - Pos;
+            float distSq = offset.LengthSq;
+            if (distSq < Flock.VIEW_SQ)
+            {
+                center = center + other.Pos;
+                align = align + other.Vel;
+                if (distSq < 9)
+                {
+                    away = away - offset;
+                }
+                count++;
+            }
+        }
+        Neighbours = count;
+        if (count > 0)
+        {
+            float inv = 1.0 / count;
+            SVec2 toCenter = center * inv - Pos;
+            SVec2 avgVel = align * inv - Vel;
+            Vel = Vel + toCenter * 0.6 * dt + avgVel * 1.5 * dt + away * 4 * dt;
+        }
+        Vel = Flock.Limit(Vel, Flock.MAX_SPEED);
+        Pos = Pos + Vel * dt;
+        // bounce off the walls (Pos is also clamped to its range, in 0..200)
+        if (Pos.X <= 0 || Pos.X >= Flock.WORLD)
+        {
+            Vel = new SVec2(-Vel.X, Vel.Y);
+        }
+        if (Pos.Y <= 0 || Pos.Y >= Flock.WORLD)
+        {
+            Vel = new SVec2(Vel.X, -Vel.Y);
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(Neighbours > 6 ? 3 : 1, Pos.X, Pos.Y);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 1200; i++)
+        {
+            Spawn(new Boid
+            {
+                Pos = new SVec2(Random.Float(0, Flock.WORLD), Random.Float(0, Flock.WORLD)),
+                Vel = new SVec2(Random.Float(-10, 10), Random.Float(-10, 10))
+            });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 100 == 0)
+        {
+            mut int crowded = 0;
+            foreach (var boid in Query<Boid>())
+            {
+                if (boid.Neighbours > 6)
+                {
+                    crowded++;
+                }
+            }
+            Print($"tick {Time.Tick}: {crowded} of {Count<Boid>()} boids are in dense flocks");
+        }
+    }
+}

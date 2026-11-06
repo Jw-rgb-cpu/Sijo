@@ -1,0 +1,189 @@
+// Task parallelism between systems: these systems touch disjoint data, so they share one stage
+// and, each having fewer rows than its parallel threshold, run side by side (one thread each). Two
+// of them message the same mailbox; the mailbox folds the messages in an order-sensitive way, so
+// any change in the order of deferred commands (which must be the stage order) shows in the output.
+// Same output and checksum on 1 thread (the systems one after another) and on 4.
+public class Hasher : Entity
+{
+    public mut int H;
+
+    public void Update(float dt)
+    {
+        mut int h = H;
+        for (int i = 0; i < 400; i++)
+        {
+            h = h * 1103515245 + 12345;
+            h ^= h >> 13;
+        }
+        H = h;
+    }
+}
+
+public class Walker : Entity
+{
+    public mut float X;
+    public mut float V;
+
+    public void Update(float dt)
+    {
+        X += V * dt;
+        if (X < 0 || X > 10)
+        {
+            V = -V;
+        }
+    }
+}
+
+public class Counter : Entity
+{
+    public mut int N;
+
+    public void Update(float dt)
+    {
+        N += 1;
+        if (N % 45 == 0)
+        {
+            Destroy();
+        }
+    }
+}
+
+public class Talker : Entity
+{
+    public mut int K;
+
+    public void Update(float dt)
+    {
+        K += 1;
+        if (K % 30 == 0)
+        {
+            Print($"talker {K}");
+        }
+    }
+}
+
+// reads a peer's list and appends to its own: the list is double-buffered (hazard) and the
+// snapshot copy goes to the frame arena of whichever slot runs the system
+public class Gossip : Entity
+{
+    public mut List<int> Heard;
+    public Gossip? Peer;
+    public int Id;
+
+    public void Update(float dt)
+    {
+        mut int got = 0;
+        if (Peer is Gossip p)
+        {
+            got = p.Heard.Count;
+            if (got > 0)
+            {
+                got += p.Heard[0];
+            }
+        }
+        Heard.Add(Id + got);
+        if (Heard.Count > 6)
+        {
+            Heard.RemoveAt(0);
+        }
+    }
+}
+
+public class Mailbox : Entity
+{
+    public mut int Sum;
+    public mut int Count;
+
+    public void Receive(int v)
+    {
+        Sum = Sum * 31 + v;
+        Count += 1;
+    }
+}
+
+public class Mailer : Entity
+{
+    public Mailbox? Box;
+    public int Id;
+
+    public void Update(float dt)
+    {
+        if (Box is Mailbox b)
+        {
+            b.Receive(Id * 2 + 1);
+        }
+    }
+}
+
+public class Poster : Entity
+{
+    public Mailbox? Box;
+    public int Id;
+
+    public void Update(float dt)
+    {
+        if (Box is Mailbox b)
+        {
+            b.Receive(Id * 3 + 1000);
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Mailbox? box = Spawn(new Mailbox { });
+        for (int i = 0; i < 120; i++)
+        {
+            Spawn(new Hasher { H = i });
+            Spawn(new Walker { X = (float)(i % 10), V = (float)(i % 7) - 3 });
+            Spawn(new Counter { N = i });
+            Spawn(new Mailer { Box = box, Id = i });
+            Spawn(new Poster { Box = box, Id = i });
+        }
+        Spawn(new Talker { });
+        mut Gossip? prev = null;
+        for (int i = 0; i < 100; i++)
+        {
+            Gossip? g = Spawn(new Gossip { Id = i, Peer = prev });
+            prev = g;
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 20 == 0)
+        {
+            mut int h = 0;
+            mut float x = 0;
+            mut int n = 0;
+            foreach (var e in Query<Hasher>())
+            {
+                h ^= e.H;
+            }
+            foreach (var e in Query<Walker>())
+            {
+                x += e.X;
+            }
+            foreach (var e in Query<Counter>())
+            {
+                n += e.N;
+            }
+            mut int gs = 0;
+            foreach (var g in Query<Gossip>())
+            {
+                gs = gs * 7 + g.Heard.Count;
+                if (g.Heard.Count > 0)
+                {
+                    gs += g.Heard[g.Heard.Count - 1];
+                }
+            }
+            Print($"gossip {gs}");
+            foreach (var m in Query<Mailbox>())
+            {
+                Print($"tick {Time.Tick}: hash {h} x {x:R} counters {Count<Counter>()} {n} mail {m.Sum} {m.Count}");
+            }
+        }
+    }
+}

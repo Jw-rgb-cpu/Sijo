@@ -1,0 +1,106 @@
+public enum EState
+{
+    Playing,
+    Over
+}
+
+public static class Arena
+{
+    public const float WIDTH = 60;
+    public const float HEIGHT = 22;
+    public const float SHIP_Y = 1;
+}
+
+public class Ship : Entity
+{
+    public mut float in 1..59 X = 30;
+    public mut int in 0..9 Lives = 3;
+    public mut int Score;
+    public mut int Best;
+    public mut EState State;
+    [Precision(0.05)] public mut float in 0..2 Shield;
+
+    public void Update(float dt)
+    {
+        if (State == EState.Playing)
+        {
+            Score += 1;
+            Shield -= dt;
+        }
+    }
+
+    public void Steer(int direction)
+    {
+        if (State == EState.Playing)
+        {
+            X += direction * 0.75;
+        }
+    }
+
+    public void Hit()
+    {
+        if (State != EState.Playing || Shield > 0)
+        {
+            return;
+        }
+        Lives -= 1;
+        Shield = 1.5;
+        Host.Bell();
+        if (Lives <= 0)
+        {
+            State = EState.Over;
+            Best = Math.Max(Best, Score);
+        }
+    }
+
+    public void Restart()
+    {
+        if (State == EState.Over)
+        {
+            Lives = 3;
+            Score = 0;
+            Shield = 1;
+            State = EState.Playing;
+        }
+    }
+
+    public client void Input()
+    {
+        if (Host.IsKeyDown(EKey.Left))
+        {
+            Steer(-1);
+        }
+        if (Host.IsKeyDown(EKey.Right))
+        {
+            Steer(1);
+        }
+        if (Host.IsKeyDown(EKey.Restart))
+        {
+            Restart();
+        }
+    }
+
+    public client void Render()
+    {
+        bool bBlink = Shield > 0 && Time.Tick % 10 < 5;
+        if (!bBlink)
+        {
+            Draw.Sprite(1, X, Arena.SHIP_Y);
+        }
+        mut string hearts = "";
+        for (int i = 0; i < Lives; i++)
+        {
+            hearts += "<3 ";
+        }
+        Draw.Text(1, Arena.HEIGHT, $"SCORE {Score / 10}   BEST {Best / 10}   {hearts}");
+        string banner = State switch
+        {
+            EState.Playing => "",
+            EState.Over => "GAME OVER - press R to play again",
+        };
+        if (banner.Length > 0)
+        {
+            Draw.Text(Arena.WIDTH / 2 - banner.Length * 0.5, Arena.HEIGHT / 2, banner);
+        }
+    }
+}

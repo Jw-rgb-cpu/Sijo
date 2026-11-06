@@ -1,0 +1,49 @@
+1: ship 1 added Burning; has it in this system: False
+1: ship 1 burning left=3 power=2 hp=100
+1: burning=1 (left 3) stunned=0 ships=4 fighters=1 rocks=2
+2: ship 1 burning left=2 power=2 hp=98
+2: ship 2 burning left=4 power=3 hp=100
+2: burning=2 (left 6) stunned=0 ships=4 fighters=1 rocks=2
+3: ship 1 sees ship 2 burning 3
+3: ship 1 burning left=1 power=2 hp=96
+3: ship 2 burning left=18 power=3 hp=97
+3: burning=2 (left 19) stunned=0 ships=4 fighters=1 rocks=2
+4: ship 2 burning left=17 power=3 hp=94
+4: ship 3 shielded 2
+4: burning=1 (left 17) stunned=1 ships=4 fighters=1 rocks=2
+5: ship 1 is stunned
+5: ship 2 burning left=16 power=3 hp=91
+5: ship 3 shielded 2
+5: burning=2 (left 18) stunned=1 ships=4 fighters=1 rocks=2
+6: ship 2 burning left=15 power=3 hp=88
+6: ship 3 shielded 5
+6: burning=2 (left 16) stunned=0 ships=4 fighters=1 rocks=2
+7: ship 2 burning left=14 power=3 hp=85
+7: ship 3 shielded 5
+7: ship 4 shielded 7
+7: burning=1 (left 14) stunned=0 ships=4 fighters=1 rocks=2
+8: ship 2 burning left=13 power=3 hp=82
+8: ship 3 shielded 5
+8: ship 4 shielded 7
+8: burning=1 (left 13) stunned=0 ships=4 fighters=1 rocks=2
+9: doom
+9: ship 2 burning left=12 power=3 hp=79
+9: ship 3 shielded 5
+9: ship 4 shielded 7
+9: burning=1 (left 12) stunned=0 ships=4 fighters=1 rocks=1
+10: ship 2 burning left=2 power=5 hp=76
+10: ship 3 shielded 5
+10: ship 4 shielded 7
+10: burning=1 (left 2) stunned=0 ships=4 fighters=1 rocks=1
+11: ship 2 burning left=1 power=6 hp=71
+11: ship 3 shielded 5
+11: ship 4 shielded 7
+11: burning=1 (left 1) stunned=0 ships=4 fighters=1 rocks=1
+12: ship 3 shielded 5
+12: ship 4 shielded 7
+12: burning=0 (left 0) stunned=0 ships=4 fighters=1 rocks=1
+rock 1 heat=1 pulses=11
+ship 1 hp=94
+ship 2 hp=65
+ship 3 hp=100
+ship 4 hp=100

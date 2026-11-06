@@ -1,0 +1,43 @@
+{
+  "name": "sijo-lang",
+  "displayName": "Sijo",
+  "description": "Sijo game language: IntelliSense, lint, compiler insights (ECS, network, memory) and live coding",
+  "version": "0.1.0",
+  "publisher": "sijo",
+  "license": "MIT",
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Programming Languages", "Linters"],
+  "activationEvents": ["onLanguage:sijo"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "sijo",
+        "aliases": ["Sijo", "sijo"],
+        "extensions": [".sijo"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "sijo", "scopeName": "source.sijo", "path": "./syntaxes/sijo.tmLanguage.json" }
+    ],
+    "configuration": {
+      "title": "Sijo",
+      "properties": {
+        "sijo.compilerPath": {
+          "type": "string",
+          "default": "sijoc",
+          "description": "Path to the sijoc executable (used for the language server and live coding)."
+        }
+      }
+    },
+    "commands": [
+      { "command": "sijo.live", "title": "Sijo: Start Live Coding" },
+      { "command": "sijo.explain", "title": "Sijo: Explain Compiler Decisions" },
+      { "command": "sijo.fixAll", "title": "Sijo: Fix All Lint Issues" }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

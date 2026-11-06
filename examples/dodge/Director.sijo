@@ -1,0 +1,27 @@
+// Waves of rocks, written as a coroutine: its frame (wave, loop counter, timer) is entity state.
+public class Director : Entity
+{
+    public mut int Wave;
+
+    public async void Run()
+    {
+        while (true)
+        {
+            Wave += 1;
+            int count = 8 + Wave * 4;
+            for (int i = 0; i < count; i++)
+            {
+                float speed = Random.Float(5, 9) + Wave * 1.5;
+                Spawn(new Rock { Pos = new SVec2(Random.Float(1, Arena.WIDTH - 1), Arena.HEIGHT), Speed = speed, Drift = Random.Float(-2, 2) });
+                await Wait(Math.Max(0.08, 0.45 - Wave * 0.05));
+            }
+            await Until(Count<Rock>() == 0);
+            await Wait(1.5);
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Text(Arena.WIDTH - 9, Arena.HEIGHT, $"WAVE {Wave}");
+    }
+}

@@ -1,0 +1,38 @@
+// Draw order after a restore (tests/embed.rs): entities are spawned and destroyed (swap-remove
+// reorders rows), and each draws its id. The client runs its systems in server-slot order, so an
+// uninterrupted game and one restored from a save draw the same list in the same order.
+public class Dot : Entity
+{
+    public int in 0..1000 Id;
+    public mut int Life;
+
+    public void Update(float dt)
+    {
+        Life -= 1;
+        if (Life <= 0)
+        {
+            Destroy();
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(Id, 0, 0);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 3 == 1)
+        {
+            Spawn(new Dot { Id = Time.Tick, Life = 5 + Time.Tick % 7 });
+            Spawn(new Dot { Id = Time.Tick + 500, Life = 3 + Time.Tick % 5 });
+        }
+    }
+}

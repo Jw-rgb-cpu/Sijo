@@ -1,0 +1,252 @@
+// Generic methods and structs: declared once, compiled once per distinct list of type arguments
+// (written, or inferred from the arguments as in C#). Static, struct and entity methods; ref
+// parameters, lists, arrays, nullable entity references, default(T), nested and recursive generic
+// calls, lambdas over T; generic structs with constructors, operators, static methods, field
+// initializers, as entity fields and as parameters of generic methods; collection initializers.
+// Expected output: C# (.NET 8) semantics.
+public struct Money
+{
+    public int Cents;
+
+    public Money(int cents)
+    {
+        Cents = cents;
+    }
+
+    public int CompareTo(Money other) => Cents - other.Cents;
+
+    public string Show() => $"${Cents / 100}.{Cents % 100:D2}";
+}
+
+public struct Picker
+{
+    public int Turn;
+
+    public T Choose<T>(T a, T b) => Turn % 2 == 0 ? a : b;
+
+    public static own List<T> Pair<T>(T a, T b)
+    {
+        mut var xs = new List<T>();
+        xs.Add(a);
+        xs.Add(b);
+        return xs;
+    }
+}
+
+public struct Pair<T>
+{
+    public T First;
+    public T Second;
+
+    public Pair(T a, T b)
+    {
+        First = a;
+        Second = b;
+    }
+
+    public Pair<T> Swapped() => new Pair<T>(Second, First);
+
+    public static Pair<T> Of(T v) => new Pair<T>(v, v);
+
+    public static bool operator ==(Pair<T> x, Pair<T> y) => x.First.Equals(y.First) && x.Second.Equals(y.Second);
+    public static bool operator !=(Pair<T> x, Pair<T> y) => !(x == y);
+}
+
+public struct Range<T> where T : struct
+{
+    public T Lo;
+    public T Hi;
+    public int Hits = 0;
+
+    public bool Contains(T v) => v.CompareTo(Lo) >= 0 && v.CompareTo(Hi) <= 0;
+
+    public mut void Note(T v)
+    {
+        if (Contains(v))
+        {
+            Hits++;
+        }
+    }
+}
+
+public struct Slot<K, V>
+{
+    public K Key;
+    public V Value;
+}
+
+public class Bag : Entity
+{
+    public mut Pair<int> Dice;
+    public mut Slot<string, float> Label;
+    public Bag? Next;
+
+    public void Update(float dt)
+    {
+        Dice = new Pair<int>(Dice.Second, (Dice.First + Dice.Second + 1) % 6);
+        Label.Value += 0.5f;
+    }
+}
+
+public static class G
+{
+    public static T Left<T>(Pair<T> p) => p.First;
+
+    public static Pair<T> Twice<T>(T v) => Pair<T>.Of(v);
+
+    public static T Max<T>(T a, T b) => a.CompareTo(b) >= 0 ? a : b;
+
+    public static T Max3<T>(T a, T b, T c) => Max(Max(a, b), c);
+
+    public static void Swap<T>(ref T a, ref T b)
+    {
+        T t = a;
+        a = b;
+        b = t;
+    }
+
+    public static own List<T> Repeat<T>(T value, int n)
+    {
+        mut var xs = new List<T>();
+        for (int i = 0; i < n; i++)
+        {
+            xs.Add(value);
+        }
+        return xs;
+    }
+
+    public static T LastOr<T>(List<T> xs, T fallback) => xs.Count > 0 ? xs[xs.Count - 1] : fallback;
+
+    public static int IndexOf<T>(T[] xs, T v)
+    {
+        for (int i = 0; i < xs.Length; i++)
+        {
+            if (xs[i].Equals(v))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    public static int CountAbove<T>(List<T> xs, T bound) => xs.Count(x => x.CompareTo(bound) > 0);
+
+    public static T Zero<T>() => default(T);
+
+    [Recursive]
+    public static int Depth<T>(List<T> xs, int n) => n == 0 ? xs.Count : Depth(xs, n - 1) + 1;
+
+    public static int Alive<T>(List<T?> xs) where T : Entity
+    {
+        mut int n = 0;
+        foreach (var x in xs)
+        {
+            if (x is T)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    public static K FirstKey<K, V>(Dictionary<K, V> d, V v)
+    {
+        foreach (var kv in d)
+        {
+            if (kv.Value.Equals(v))
+            {
+                return kv.Key;
+            }
+        }
+        return default;
+    }
+}
+
+public class Ship : Entity
+{
+    public int Id;
+    public mut int Score;
+    public Ship? Rival;
+
+    T Pick<T>(T even, T odd) => Id % 2 == 0 ? even : odd;
+
+    public void Update(float dt)
+    {
+        Score += Pick(10, 3) + G.Max(Id, Time.Tick);
+        float w = Pick(0.5f, 2);
+        Score += (int)(w * 4);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Print($"{G.Max(3, 7)} {G.Max(2.5f, -1.0f)} {G.Max(1, 2.5f)} {G.Max("pear", "apple")} {G.Max('a', 'z')}");
+        Print($"{G.Max3(4, 9, 2)} {G.Max3(new Money(250), new Money(1999), new Money(5)).Show()}");
+        mut int a = 1;
+        mut int b = 2;
+        G.Swap(ref a, ref b);
+        mut string s = "left";
+        mut string t = "right";
+        G.Swap<string>(ref s, ref t);
+        Print($"{a} {b} {s} {t}");
+        var r = G.Repeat("ab", 3);
+        Print($"{r.Count} {string.Join(",", r)} {G.Repeat(1.5f, 2).Sum()} {G.LastOr(r, "none")} {G.LastOr(new List<int>(), -1)}");
+        int[] arr = { 4, 8, 15, 16, 23, 42 };
+        Print($"{G.IndexOf(arr, 15)} {G.IndexOf(arr, 7)} {G.IndexOf(new string[] { "x", "y" }, "y")}");
+        var nums = new List<int> { 3, 9, 1, 12, 7 };
+        Print($"{G.CountAbove(nums, 5)} {G.CountAbove(G.Repeat(2.0f, 4), 1.5f)}");
+        Print($"{G.Zero<int>()} {G.Zero<float>()} {G.Zero<bool>()} [{G.Zero<string>()}] {G.Zero<Money>().Cents} {G.Depth(nums, 3)}");
+        mut var p = new Picker();
+        p.Turn = 1;
+        Print($"{p.Choose(1, 2)} {p.Choose("a", "b")} {Picker.Pair(5, 6).Count} {Picker.Pair('x', 'y')[1]}");
+        mut var ages = new Dictionary<string, int>();
+        ages["ann"] = 31;
+        ages["bob"] = 42;
+        Print($"{G.FirstKey(ages, 42)} [{G.FirstKey(ages, 7)}]");
+        var pr = new Pair<int>(1, 2);
+        Pair<string> q = new Pair<string>("a", "b");
+        var rv = pr.Swapped();
+        Print($"{pr.First} {pr.Second} {rv.First} {rv.Second} {q.Swapped().First} {pr == rv} {pr == rv.Swapped()}");
+        mut var rng = new Range<float> { Lo = 0.5f, Hi = 2 };
+        rng.Note(1);
+        rng.Note(3);
+        rng.Note(2);
+        Print($"{rng.Hits} {rng.Contains(0.25f)} {G.Left(q)} {G.Left(new Pair<char>('x', 'y'))} {G.Twice(7).Second}");
+        var slot = new Slot<string, float> { Key = "k", Value = 1.5f };
+        Print($"{slot.Key}={slot.Value} {Pair<int>.Of(4).Second} {default(Pair<int>).First}");
+        Spawn(new Bag { Dice = new Pair<int>(1, 1) });
+        for (int i = 0; i < 4; i++)
+        {
+            Spawn(new Ship { Id = i });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            mut var ships = new List<Ship?>();
+            foreach (var s in Query<Ship>())
+            {
+                ships.Add(s);
+            }
+            ships.Add(null);
+            Print($"{G.Alive(ships)} of {ships.Count}");
+        }
+        if (Time.Tick == 3)
+        {
+            mut int total = 0;
+            foreach (var s in Query<Ship>())
+            {
+                total += s.Score;
+            }
+            Print($"score {total}");
+            foreach (var b in Query<Bag>())
+            {
+                Print($"{b.Dice.First} {b.Dice.Second} {b.Label.Value}");
+            }
+        }
+    }
+}

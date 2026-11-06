@@ -1,0 +1,60 @@
+// Parallel spawning: systems whose Spawn handles are unused run in parallel; spawns go to
+// per-thread tables merged in row order, so ids, order and results match the serial run.
+public class Emitter : Entity
+{
+    public mut float Heat;
+    public mut int Shots;
+
+    public void Update(float dt)
+    {
+        Heat += Random.Float(0, 1);
+        if (Heat > 3)
+        {
+            Heat = 0;
+            Shots += 1;
+            Spawn(new Spark { Life = Random.Int(2, 9), Value = Shots });
+            if (Shots % 3 == 0)
+            {
+                Spawn(new Spark { Life = 1, Value = -Shots });
+            }
+        }
+    }
+}
+
+public class Spark : Entity
+{
+    public mut int Life;
+    public int Value;
+
+    public void Update(float dt)
+    {
+        Life -= 1;
+        if (Life <= 0)
+        {
+            Destroy();
+        }
+    }
+}
+
+public class Keeper : Entity
+{
+    public mut Spark? Last;
+
+    public void Update(float dt)
+    {
+        // uses the spawned handle: this system must stay serial
+        Last = Spawn(new Spark { Life = 2, Value = 7 });
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 2000; i++)
+        {
+            Spawn(new Emitter { Heat = Random.Float(0, 3) });
+        }
+        Spawn(new Keeper());
+    }
+}

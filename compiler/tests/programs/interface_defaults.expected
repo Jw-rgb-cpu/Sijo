@@ -1,0 +1,10 @@
+fill 2.5 counter empty True stack -1 7 fill 4 stack 1
+t1: alive 3 threat 39 stored 1 empty 1 ticks 101 hp 8 6 4 
+t2: alive 3 threat 31 stored 2 empty 1 ticks 202 hp 5 6 3 
+t3: alive 2 threat 21 stored 9 empty 0 ticks 303 hp 0 6 3 
+t4: alive 2 threat 19 stored 9 empty 0 ticks 404 hp 0 6 2 
+t5: alive 2 threat 19 stored 9 empty 0 ticks 505 hp 0 6 2 
+t6: alive 2 threat 17 stored 9 empty 0 ticks 606 hp 0 6 1 
+t7: alive 2 threat 17 stored 15 empty 0 ticks 707 hp 0 6 1 
+top 6
+t8: alive 1 threat 15 stored 15 empty 0 ticks 808 hp 0 6 0 

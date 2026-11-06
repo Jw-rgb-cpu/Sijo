@@ -1,0 +1,22 @@
+int 3
+float 2.5
+int 65
+string hi
+pair 1 2
+orc
+orc
+unit
+read 42 1.5
+dot 9 3 4 2
+t1 crate sum 0 items 0 logged 503
+t1 unit hp 100 score 30
+t1 unit hp 100 score 6
+t2 crate sum 3 items 2 logged 503
+t2 unit hp 100 score 30
+t2 unit hp 84 score 6
+t3 crate sum 7 items 4 logged 503
+t3 unit hp 100 score 30
+t3 unit hp 84 score 6
+t4 crate sum 12 items 6 logged 503
+t4 unit hp 100 score 30
+t4 unit hp 84 score 6

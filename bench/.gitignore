@@ -1,0 +1,4 @@
+build/
+csharp/obj/
+csharp/bin/
+results/latest-quick.*

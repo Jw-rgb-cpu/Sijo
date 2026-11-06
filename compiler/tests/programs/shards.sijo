@@ -1,0 +1,256 @@
+// Cross-shard semantics (tests/shard_e2e.rs): every result must equal the single-process run for
+// any number of shards (worlds in one process or separate processes), threads and network faults.
+// - Runners cross the world fast (many handoffs) and look at their neighbours within a proven
+//   radius (halo copies), spawn sparks and keep the handle (provisional until the barrier), write
+//   to sparks that may live on another shard, change strings, lists and dictionaries that messages
+//   read (copies to every shard), and print (the coordinator prints in the single-process order).
+// - Sparks send messages to their owner (on any shard) and are destroyed by bees on other shards.
+// - Hives put the handles they spawn into a list: that only works serially, so every shard runs
+//   them (a replicated system) after the runners' spawns of the same stage are merged.
+using Sijo;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public float LengthSq => X * X + Y * Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+}
+
+public static class W
+{
+    public const float SIZE = 100;
+    public const float NEAR = 6;
+    public const float NEAR_SQ = NEAR * NEAR;
+
+    public static SVec2 Wrap(SVec2 p)
+    {
+        mut float x = p.X;
+        mut float y = p.Y;
+        if (x < 0)
+        {
+            x += SIZE;
+        }
+        if (x >= SIZE)
+        {
+            x -= SIZE;
+        }
+        if (y < 0)
+        {
+            y += SIZE;
+        }
+        if (y >= SIZE)
+        {
+            y -= SIZE;
+        }
+        return new SVec2(x, y);
+    }
+}
+
+// a component added to a runner on any shard (a deferred Add from a bee): it moves the runner to
+// another table on every shard in the same order, runs on the runner's owner and removes itself
+public component Stung
+{
+    public mut int Left = 3;
+
+    public void Update(float dt)
+    {
+        Left -= 1;
+        if (Owner is Runner r)
+        {
+            r.Hp -= 1;
+        }
+        if (Left <= 0)
+        {
+            Remove<Stung>();
+        }
+    }
+}
+
+public class Runner : Entity
+{
+    [Spatial] public mut SVec2 Pos;
+    public mut SVec2 Vel;
+    public int Id;
+    public mut int in 0..1000 Hp = 500;
+    public mut int Seen;
+    public mut int Hits;
+    public mut string Tag = "";
+    public mut List<int> Log;
+    public mut Dictionary<int, int> Counts;
+    public mut Spark? Last;
+
+    public void Update(float dt)
+    {
+        mut int near = 0;
+        mut SVec2 push = new SVec2(0, 0);
+        foreach (var o in Query<Runner>())
+        {
+            if (o == this)
+            {
+                continue;
+            }
+            SVec2 d = o.Pos - Pos;
+            if (d.LengthSq < W.NEAR_SQ)
+            {
+                near++;
+                push = push - d * 0.05;
+            }
+        }
+        Seen = near;
+        Vel = Vel + push;
+        Pos = W.Wrap(Pos + Vel * dt);
+        if (near > 1)
+        {
+            Tag = $"crowd{near}";
+            Log.Add(near);
+        }
+        if (Log.Count > 6)
+        {
+            Log.RemoveAt(0);
+        }
+        Counts[near] = Counts.GetValueOrDefault(near, 0) + 1;
+        if ((Time.Tick + Id) % 9 == 0)
+        {
+            Last = Spawn(new Spark { Pos = Pos, Owner = this, Life = 20 + Id % 7 });
+        }
+        else if (Last is Spark s)
+        {
+            s.Life -= 1;
+        }
+        if (Id % 5 == 0 && Time.Tick % 40 == 0)
+        {
+            Print($"tick {Time.Tick}: runner {Id} hp {Hp} hits {Hits} seen {Seen} tag '{Tag}' log {Log.Count}");
+        }
+    }
+
+    public void Hit(int n)
+    {
+        Hp -= n;
+        Hits++;
+        if (Tag.Length > 12)
+        {
+            Tag = "";
+        }
+        Tag = Tag + "!";
+        mut int sum = 0;
+        foreach (int v in Log)
+        {
+            sum += v;
+        }
+        Counts[-1] = Counts.GetValueOrDefault(-1, 0) + sum;
+    }
+}
+
+public class Spark : Entity
+{
+    [Spatial] public mut SVec2 Pos;
+    public Runner? Owner;
+    public mut int Life;
+
+    public void Update(float dt)
+    {
+        Life -= 1;
+        if (Life <= 0)
+        {
+            Destroy();
+            return;
+        }
+        if (Life % 4 == 0 && Owner is Runner o)
+        {
+            o.Hit(Random.Int(1, 4));
+        }
+    }
+}
+
+public class Hive : Entity
+{
+    [Spatial] public mut SVec2 Pos;
+    public mut List<Bee?> Bees;
+    public mut int Made;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick % 11 == 0 && Bees.Count < 6)
+        {
+            var b = Spawn(new Bee { Pos = Pos, Vel = new SVec2(Random.Float(-40, 40), Random.Float(-40, 40)) });
+            Bees.Add(b);
+            Made++;
+        }
+        if (Bees.Count > 0 && Time.Tick % 17 == 0)
+        {
+            Bees.RemoveAt(0);
+        }
+    }
+}
+
+public class Bee : Entity
+{
+    [Spatial] public mut SVec2 Pos;
+    public mut SVec2 Vel;
+    public mut int Stung;
+
+    public void Update(float dt)
+    {
+        Pos = W.Wrap(Pos + Vel * dt);
+        foreach (var s in Query<Spark>())
+        {
+            if ((s.Pos - Pos).LengthSq < 4)
+            {
+                Destroy(s);
+                Stung++;
+                if (s.Owner is Runner o)
+                {
+                    o.Hit(10);
+                    o.Add(new Stung { Left = 2 + Stung % 3 });
+                }
+                return;
+            }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 160; i++)
+        {
+            float x = Random.Float(0, W.SIZE);
+            float y = Random.Float(0, W.SIZE);
+            Spawn(new Runner { Id = i, Pos = new SVec2(x, y), Vel = new SVec2(Random.Float(-60, 60), Random.Float(-20, 20)) });
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            Spawn(new Hive { Pos = new SVec2(12 + 25 * i, 50) });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 50 == 0)
+        {
+            mut int hp = 0;
+            foreach (var r in Query<Runner>())
+            {
+                hp += r.Hp;
+            }
+            mut int stung = 0;
+            foreach (var r in Query<Runner, Stung>())
+            {
+                stung++;
+            }
+            Print($"tick {Time.Tick}: runners={Count<Runner>()} sparks={Count<Spark>()} bees={Count<Bee>()} hp={hp} stung={stung}");
+        }
+    }
+}

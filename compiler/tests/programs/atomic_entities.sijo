@@ -1,0 +1,212 @@
+// atomic blocks: every operation on collection fields of an entity (heap lists, dictionaries and
+// lists of lists), `ref`/`out` collection parameters, virtual methods whose overrides change a
+// list field only the derived archetype has, on a list field other entities read while it
+// changes (double-buffered), with a local moved into a field and into an `own` parameter, and with
+// spawned entities that own lists: `fail` puts everything back and frees what it throws away.
+public static class Ops
+{
+    public static void TryPush(ref List<int> xs, int v)
+    {
+        atomic
+        {
+            xs.Add(v);
+            xs.Sort();
+            if (v < 0)
+            {
+                fail;
+            }
+        }
+    }
+
+    public static void TryMake(out List<int> xs, int v)
+    {
+        xs = new List<int>();
+        atomic
+        {
+            xs = new List<int> { v, v };
+            if (v < 0)
+            {
+                fail;
+            }
+        }
+    }
+
+    public static int Size(own List<int> xs)
+    {
+        return xs.Count;
+    }
+
+    public static string L(List<int> xs) => "[" + string.Join(",", xs) + "]";
+
+    public static string D(Dictionary<int, int> d)
+    {
+        mut string o = "";
+        foreach (var kv in d)
+        {
+            o += $"{kv.Key}={kv.Value};";
+        }
+        return "{" + o + "}";
+    }
+
+    public static string G(List<List<int>> g)
+    {
+        mut string o = "";
+        foreach (var r in g)
+        {
+            o += L(r);
+        }
+        return "{" + o + "}";
+    }
+}
+
+// every operation on collection fields (heap lists), undone and then kept
+public class Box : Entity
+{
+    public mut List<int> Xs;
+    public mut Dictionary<int, int> D;
+    public mut List<List<int>> G;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            atomic { Xs.Add(3); Xs.Add(1); Xs.Add(2); D[1] = 10; D[2] = 20; G.Add(new List<int> { 1 }); G.Add(new List<int> { 2, 3 }); }
+        }
+        atomic { Xs.Add(4); fail; }
+        atomic { Xs.Insert(0, 9); fail; }
+        atomic { Xs.RemoveAt(0); fail; }
+        atomic { Xs.Remove(3); fail; }
+        atomic { Xs.Clear(); fail; }
+        atomic { Xs.Reverse(); Xs.Sort(); fail; }
+        atomic { Xs[0] = 8; Xs[0] += 1; fail; }
+        atomic { Xs = new List<int> { 0 }; fail; }
+        atomic { Xs.RemoveAll(x => x > 1); fail; }
+        atomic { D[1] = 11; D[5] = 50; fail; }
+        atomic { D.Remove(1); fail; }
+        atomic { D.Clear(); fail; }
+        atomic { D = new Dictionary<int, int>(); fail; }
+        atomic { D.Add(4 + Time.Tick * 10, 30); fail; }
+        atomic { G.RemoveAt(0); fail; }
+        atomic { G.Clear(); fail; }
+        atomic { G[0] = new List<int>(); fail; }
+        atomic { G[0].Add(5); G[0][0] = 6; fail; }
+        atomic { G = new List<List<int>>(); fail; }
+        atomic { G.Add(new List<int> { 7 }); fail; }
+        if (Time.Tick == 2)
+        {
+            atomic { Xs.Insert(0, 9); Xs.RemoveAt(1); Xs.Reverse(); D.Remove(1); D.Add(3, 30); G.RemoveAt(0); G[0].Add(4); if (Xs.Count > 9) { fail; } }
+        }
+        if (Time.Tick == 3)
+        {
+            atomic { Xs = new List<int> { 5 }; D.Clear(); G.Clear(); G.Add(new List<int> { 8 }); if (Xs.Count > 9) { fail; } }
+        }
+    }
+}
+
+public class Animal : Entity
+{
+    public mut List<int> Food;
+    public mut int Fed;
+
+    public virtual void Eat(int n)
+    {
+        Food.Add(n);
+    }
+
+    public void Update(float dt)
+    {
+        atomic
+        {
+            Eat(Time.Tick);
+            Fed += 1;
+            if (Time.Tick % 2 == 0)
+            {
+                fail;
+            }
+        }
+    }
+}
+
+public class Dog : Animal
+{
+    public mut List<int> Bones;
+
+    public override void Eat(int n)
+    {
+        Bones.Insert(0, n * 10);
+        Food.Add(n);
+        Food.Reverse();
+    }
+}
+
+// Seen is read by other entities while it changes: double-buffered
+public class Node : Entity
+{
+    public int Id;
+    public mut List<int> Seen;
+    public mut List<int> Trail;
+    public mut int Peek;
+
+    public void Update(float dt)
+    {
+        foreach (var o in Query<Node>())
+        {
+            if (o.Id != Id)
+            {
+                Peek = o.Seen.Count;
+            }
+        }
+        mut var tmp = new List<int> { Id, Time.Tick };
+        mut var keep = new List<int> { 7 };
+        atomic
+        {
+            Seen.Add(Time.Tick);
+            Seen.Sort();
+            Trail = tmp;
+            int n = Ops.Size(keep);
+            Spawn(new Node { Id = 100 + n, Seen = new List<int> { 1 } });
+            if (Id == 0 || Time.Tick > 2)
+            {
+                fail;
+            }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Box { });
+        Spawn(new Animal { });
+        Spawn(new Dog { });
+        Spawn(new Node { Id = 0 });
+        Spawn(new Node { Id = 1 });
+        mut var xs = new List<int> { 5 };
+        Ops.TryPush(ref xs, 3);
+        Ops.TryPush(ref xs, -1);
+        Ops.TryMake(out var ys, 4);
+        Ops.TryMake(out var zs, -4);
+        Print($"ops {Ops.L(xs)} {Ops.L(ys)} {Ops.L(zs)}");
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var b in Query<Box>())
+        {
+            Print($"box {Time.Tick}: {Ops.L(b.Xs)} {Ops.D(b.D)} {Ops.G(b.G)}");
+        }
+        foreach (var a in Query<Animal>())
+        {
+            Print($"animal {Time.Tick}: {Ops.L(a.Food)} fed {a.Fed}");
+        }
+        foreach (var d in Query<Dog>())
+        {
+            Print($"dog {Time.Tick}: {Ops.L(d.Bones)}");
+        }
+        foreach (var n in Query<Node>())
+        {
+            Print($"node {Time.Tick} {n.Id}: {Ops.L(n.Seen)} {Ops.L(n.Trail)} peek {n.Peek}");
+        }
+    }
+}

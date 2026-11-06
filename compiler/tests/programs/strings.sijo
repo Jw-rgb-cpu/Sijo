@@ -1,0 +1,96 @@
+// Strings: literals, concatenation, interpolation, methods, string state in entities, structs and
+// lists (kept alive across ticks by the collector), switch on strings, Hangul text.
+public enum EClass
+{
+    Warrior,
+    Mage
+}
+
+public struct SItem
+{
+    public string Name;
+    public int Count;
+}
+
+public static class Names
+{
+    public const string PREFIX = "Unit-";
+    public const string GREETING = "Hello, " + "world";
+
+    public static string Title(EClass c, int level) => c switch
+    {
+        EClass.Warrior => $"Sir {level}",
+        EClass.Mage => "Archmage " + level,
+    };
+}
+
+public class Unit : Entity
+{
+    public mut string Name = "nobody";
+    public EClass Class;
+    public mut int Level = 1;
+    public mut List<string> Log;
+    public mut SItem Best;
+    public mut List<SItem> Bag;
+
+    public void Update(float dt)
+    {
+        Level += 1;
+        if (Level % 2 == 0)
+        {
+            Name = Names.PREFIX + Level.ToString() + "/" + Names.Title(Class, Level);
+            Log.Add($"lv{Level}");
+            Bag.Add(new SItem { Name = $"potion#{Level}", Count = Level });
+            Best = new SItem { Name = Name.ToUpper(), Count = Name.Length };
+        }
+        string tag = Name.Substring(0, 4);
+        if (tag != "Unit" && tag != "nobo")
+        {
+            Print("bad tag " + tag);
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Unit { Class = EClass.Mage });
+        Spawn(new Unit { Class = EClass.Warrior, Name = $"init-{Names.GREETING.Length}" });
+        Print(Names.GREETING);
+        string s = "  한글 텍스트 ";
+        Print($"[{s.Trim()}] len={s.Trim().Length} idx={s.IndexOf("텍스트")} sub={s.Trim().Substring(3)}");
+        Print("a,b,c".Replace(",", " | ") + " " + "abc".Contains("bc") + " " + string.IsNullOrEmpty(""));
+        Print($"{int.Parse("42") + 1} {float.Parse("2.5") * 2} {string.Compare("a", "b")}");
+        mut var parts = new List<string>();
+        parts.Add("x");
+        parts.Add("y");
+        Print(string.Join("-", parts) + " " + parts.Contains("y"));
+        mut int parsed;
+        mut float ratio;
+        bool okInt = int.TryParse("123", out parsed);
+        bool okBad = int.TryParse("12x", out parsed);
+        bool okFloat = float.TryParse("0.25", out ratio);
+        Print($"tryparse {okInt} {okBad} {parsed} {okFloat} {ratio}");
+        switch (s.Trim())
+        {
+            case "한글 텍스트":
+                Print("switch on string ok");
+                break;
+            default:
+                Print("switch fail");
+                break;
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 7 || Time.Tick == 299)
+        {
+            foreach (var u in Query<Unit>())
+            {
+                Print($"{u.Name} log={u.Log.Count} last={u.Log[u.Log.Count - 1]} bag={u.Bag[2].Name} best={u.Best.Name}:{u.Best.Count}");
+            }
+        }
+    }
+}

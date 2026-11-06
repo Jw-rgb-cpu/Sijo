@@ -1,0 +1,212 @@
+// village.sijo — exercises inheritance, virtual dispatch, base calls, messages between
+// entities, Verse-style transactions (atomic/fail), entity-owned lists and CTFE.
+
+using Sijo;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public float LengthSq => X * X + Y * Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+
+    // mutating struct method: the receiver must be a mutable place
+    public mut void Clamp(float lo, float hi)
+    {
+        X = Math.Clamp(X, lo, hi);
+        Y = Math.Clamp(Y, lo, hi);
+    }
+}
+
+public enum EJob
+{
+    Farmer,
+    Guard,
+    Trader
+}
+
+public static class Econ
+{
+    public const int POTION_PRICE = 15;
+    // evaluated at compile time (pure function, constant argument)
+    public const int FARMER_WAGE = Wage(2);
+
+    public static int Wage(int level) => level * level + 3;
+}
+
+public abstract class Character : Entity
+{
+    [Spatial, Precision(0.01)] public mut SVec2 in 0..100 Pos;
+    public mut int in 0..100 Hp = 100;
+    public mut int Gold = 10;
+    public mut List<int> Received;           // entity-owned list: lives on the heap, freed on Destroy
+
+    public bool IsHurt => Hp < 60;
+
+    public virtual void Update(float dt)
+    {
+        SVec2 step = new SVec2(Random.Float(-1, 1), Random.Float(-1, 1)) * (dt * 20);
+        mut SVec2 next = Pos + step;
+        next.Clamp(0, 100);
+        Pos = next;
+        if (Hp <= 0)
+        {
+            Destroy();
+        }
+    }
+
+    // client code may call read-only methods; everything they read is replicated automatically
+    public client void Render()
+    {
+        Draw.Sprite(IsHurt ? 2 : 1, Pos.X, Pos.Y);
+    }
+
+    // Modifies its entity: calling it on *another* entity is compiled into a message.
+    public void Heal(int amount)
+    {
+        Hp += amount;
+        Received.Add(amount);
+    }
+}
+
+public class Villager : Character
+{
+    public EJob Work;
+
+    public override void Update(float dt)
+    {
+        base.Update(dt);
+        if (Work == EJob.Farmer && Time.Tick % 60 == 0)
+        {
+            Gold += Econ.FARMER_WAGE;
+        }
+    }
+}
+
+public class Healer : Character
+{
+    public mut int Potions = 3;
+    public mut int Failed;
+
+    public override void Update(float dt)
+    {
+        base.Update(dt);
+        foreach (var other in Query<Character>())
+        {
+            if (other != this && other.IsHurt && Potions > 0)
+            {
+                other.Heal(25);                  // deferred message, delivered at the end of the system
+                Potions--;
+                break;
+            }
+        }
+        if (Potions < 2)
+        {
+            tryBuyPotion();
+        }
+    }
+
+    void tryBuyPotion()
+    {
+        atomic                                   // all-or-nothing: rolled back on fail
+        {
+            Gold -= Econ.POTION_PRICE;
+            Potions += 1;
+            if (Gold < 0)
+            {
+                fail;
+            }
+        }
+        if (Potions < 2)
+        {
+            Failed++;
+        }
+    }
+}
+
+public class Monster : Entity
+{
+    [Precision(0.01)] public SVec2 in 0..100 Pos;
+    public mut int Rage;
+
+    public client void Render()
+    {
+        Draw.Sprite(5, Pos.X, Pos.Y);
+    }
+
+    public void Update(float dt)
+    {
+        Rage++;
+        if (Rage % 30 != 0)
+        {
+            return;
+        }
+        mut var victims = new List<Character>(); // frame arena, capacity = Count<Character>()
+        foreach (var character in Query<Character>())
+        {
+            if ((character.Pos - Pos).LengthSq < 900)
+            {
+                victims.Add(character);
+            }
+        }
+        foreach (var victim in victims)
+        {
+            victim.Hp -= 9;                      // remote writes from many monsters merge commutatively
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 30; i++)
+        {
+            Spawn(new Villager { Pos = new SVec2(Random.Float(0, 100), Random.Float(0, 100)), Work = (EJob)(i % 3), Received = new List<int>() });
+        }
+        for (int i = 0; i < 4; i++)
+        {
+            Spawn(new Healer { Pos = new SVec2(25 * i + 10, 50), Received = new List<int>() });
+        }
+        for (int i = 0; i < 5; i++)
+        {
+            Spawn(new Monster { Pos = new SVec2(Random.Int(0, 100), Random.Int(0, 100)) });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 150 != 0)
+        {
+            return;
+        }
+        mut int hurt = 0;
+        mut int gold = 0;
+        mut int heals = 0;
+        foreach (var character in Query<Character>())
+        {
+            if (character.IsHurt)
+            {
+                hurt++;
+            }
+            gold += character.Gold;
+            heals += character.Received.Count;
+        }
+        mut int failedBuys = 0;
+        foreach (var healer in Query<Healer>())
+        {
+            failedBuys += healer.Failed;
+        }
+        Print($"tick {Time.Tick}: characters={Count<Character>()} hurt={hurt} gold={gold} heals={heals} failed-purchases={failedBuys} wage={Econ.FARMER_WAGE}");
+    }
+}

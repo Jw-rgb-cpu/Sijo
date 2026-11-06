@@ -1,0 +1,167 @@
+// Delegates: lambdas and methods as values (Func<...>, Action<...>, `delegate` declarations).
+// A stored lambda captures copies of the immutable locals and `this` it uses; through `this` it
+// reaches its entity like any other entity reference (snapshot reads, deferred writes); a value
+// whose captured entity is gone does nothing and returns the default
+// (tests/e2e.rs, expected output in delegates.expected).
+public delegate int Op(int a, int b);
+
+public struct SDamage
+{
+    public int Amount;
+    public Func<int, int> Scale;
+}
+
+public class Ship : Entity
+{
+    public mut int Hp = 100;
+    public mut int Score;
+    public string Name = "ship";
+    public Action OnTick;
+    public Func<int, int> Double = x => x * 2;
+    public mut Func<int, int> Bonus;
+    public mut Func<string> Tag;
+
+    public void Update(float dt)
+    {
+        int k = 3;
+        Func<int, int> addK = x => x + k;
+        Score = Double(5) + addK(4) + Bonus(1);
+        if (Time.Tick == 1)
+        {
+            // captures this: Hp is read through a reference (the value at the start of the system)
+            Bonus = x => x + Hp;
+            Tag = () => $"{Name}:{Hp}";
+        }
+        OnTick();
+    }
+
+    public void Heal(int n)
+    {
+        Hp += n;
+    }
+}
+
+public class Turret : Entity
+{
+    public Ship? Target;
+    public mut Action Fire;
+    public mut Action<int> Repair;
+    public mut int Shots;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1 && Target is Ship s)
+        {
+            // a deferred write to another entity, made later by whoever runs the delegate
+            Fire = () => { s.Hp -= 5; };
+            // a method bound to a reference
+            Repair = s.Heal;
+        }
+        if (Time.Tick == 2)
+        {
+            Repair(1);
+        }
+        Fire();
+        Shots++;
+    }
+}
+
+public class Mine : Entity
+{
+    public mut int Fuse = 2;
+    public void Update(float dt)
+    {
+        Fuse -= 1;
+        if (Fuse <= 0)
+        {
+            Destroy();
+        }
+    }
+    public int Power() => 40;
+}
+
+public static class Rules
+{
+    public static int Add(int a, int b) => a + b;
+    public static int Mul(int a, int b) => a * b;
+    public static int Apply(Op op, int a, int b) => op(a, b);
+    public static Func<int, int> Adder(int n) => x => x + n;
+    public static int Twice(Func<int, int> f, int x) => f(f(x));
+    public static Func<int, int> Compose(Func<int, int> f, Func<int, int> g) => x => g(f(x));
+}
+
+public class Director : Entity
+{
+    public mut Func<int> MinePower;
+    public mut int Seen;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            foreach (var m in Query<Mine>())
+            {
+                // captures a live reference: once the mine is destroyed the call does nothing
+                MinePower = () => m.Power();
+            }
+        }
+        Seen = MinePower();
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Op add = Rules.Add;
+        Op mul = Rules.Mul;
+        Print($"ops {Rules.Apply(add, 3, 4)} {Rules.Apply(mul, 3, 4)} {Rules.Apply((a, b) => a - b, 3, 4)}");
+        var add5 = Rules.Adder(5);
+        Print($"closures {add5(1)} {Rules.Twice(add5, 1)} {Rules.Twice(x => x * 3, 2)} {Rules.Compose(add5, x => x * 10)(1)}");
+        mut var ops = new List<Func<int, int>>();
+        ops.Add(x => x + 1);
+        ops.Add(Rules.Adder(10));
+        ops.Add(x => x * x);
+        mut int acc = 2;
+        foreach (var f in ops)
+        {
+            acc = f(acc);
+        }
+        Print($"list {acc} {ops.Count}");
+        string greeting = "hi";
+        Func<string, string> greet = n => $"{greeting} {n}";
+        Print(greet.Invoke("bob"));
+        Func<int> none = default;
+        Action nothing = default;
+        nothing();
+        Print($"default {none()}");
+        var dmg = new SDamage { Amount = 7, Scale = x => x * 3 };
+        Print($"struct {dmg.Scale(dmg.Amount)}");
+        Func<int, bool> even = x => x % 2 == 0;
+        Func<int, string> describe = x =>
+        {
+            if (even(x))
+            {
+                return "even";
+            }
+            return "odd";
+        };
+        Print($"{describe(3)} {describe(4)}");
+        var ship = Spawn(new Ship());
+        Spawn(new Turret { Target = ship });
+        Spawn(new Mine());
+        Spawn(new Director());
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var s in Query<Ship>())
+        {
+            Print($"t{Time.Tick} hp {s.Hp} score {s.Score} tag '{s.Tag()}'");
+        }
+        foreach (var d in Query<Director>())
+        {
+            Print($"t{Time.Tick} mine power {d.Seen} mines {Count<Mine>()}");
+        }
+    }
+}

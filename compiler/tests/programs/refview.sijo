@@ -1,0 +1,126 @@
+// Collections of entity references under interest management: the client looks at a circle around
+// the camera (Net.View) and is sent only the movers inside it. Each mover keeps a list of other
+// movers (often far away), a dictionary keyed by movers and a dictionary of movers by rank: on the
+// client an element whose target is out of view reads as null, a dictionary entry whose key is out
+// of view is not there, and both come back when the target is seen again. Movers also wrap around
+// and are replaced, so targets die and slots are reused. The run must end with the client equal to
+// the server's state restricted to the client's view (tests/net_e2e.rs).
+public struct SVec2
+{
+    public float X;
+    public float Y;
+}
+
+public class Mover : Entity
+{
+    public int Id;
+    public mut SVec2 Pos;
+    public float Speed;
+    public mut int Laps;
+    public mut List<Mover?> Near;
+    public mut Dictionary<Mover?, int> Met;
+    public mut Dictionary<int, Mover?> Ranks;
+
+    public void Update(float dt)
+    {
+        Pos.X += Speed;
+        if (Pos.X > 100)
+        {
+            Pos.X -= 200;
+            Laps++;
+        }
+        if (Laps >= 2 && Id % 3 == 0)
+        {
+            Spawn(new Mover { Id = Id + 1, Pos = new SVec2 { X = -100, Y = Pos.Y }, Speed = Speed });
+            Destroy();
+        }
+    }
+
+    public void Meet(Mover? other, int rank)
+    {
+        if (other is Mover m)
+        {
+            if (!Near.Contains(m))
+            {
+                Near.Add(m);
+            }
+            if (Near.Count > 6)
+            {
+                Near.RemoveAt(0);
+            }
+            Met[m] = Met.GetValueOrDefault(m) + 1;
+            Ranks[rank % 5] = m;
+        }
+    }
+
+    public client void Render()
+    {
+        mut int near = 0;
+        foreach (var n in Near)
+        {
+            if (n is Mover m)
+            {
+                near += m.Id;
+            }
+        }
+        mut int met = 0;
+        foreach (var kv in Met)
+        {
+            if (kv.Key is Mover m)
+            {
+                met += kv.Value + m.Laps;
+            }
+        }
+        mut int ranks = 0;
+        foreach (var kv in Ranks)
+        {
+            ranks += kv.Value is Mover m ? m.Id + kv.Key : -1;
+        }
+        Draw.Text(Pos.X, Pos.Y, $"{Id}>{near}/{Near.Count} {met}/{Met.Count} {ranks}");
+    }
+}
+
+// the camera has no position field (Pos/Position/[Spatial]), so it is always sent
+public class Camera : Entity
+{
+    public mut SVec2 Focus;
+
+    public void Update(float dt)
+    {
+        Focus.X = (Time.Tick % 240) - 120;
+    }
+
+    public client void Look()
+    {
+        Net.View(Focus.X, Focus.Y, 30);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Camera());
+        for (int i = 0; i < 60; i++)
+        {
+            Spawn(new Mover { Id = i * 10, Pos = new SVec2 { X = i * 3.3f - 100, Y = (i % 9) * 4 - 16 }, Speed = 0.4f + (i % 7) * 0.1f });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        // every few ticks each mover meets another one, often far away (out of the client's view)
+        if (Time.Tick % 4 == 1)
+        {
+            mut var all = new List<Mover>();
+            foreach (var m in Query<Mover>())
+            {
+                all.Add(m);
+            }
+            foreach (var m in Query<Mover>())
+            {
+                m.Meet(all[(m.Id * 37 + Time.Tick * 11) % all.Count], Time.Tick + m.Id);
+            }
+        }
+    }
+}

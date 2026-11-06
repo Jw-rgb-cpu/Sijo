@@ -1,0 +1,19 @@
+[package]
+name = "sijoc"
+version = "0.1.0"
+edition = "2021"
+description = "Prototype compiler for the Sijo game programming language"
+license = "MIT"
+
+[[bin]]
+name = "sijoc"
+path = "src/main.rs"
+
+[lib]
+name = "sijoc"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3

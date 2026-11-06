@@ -1,0 +1,44 @@
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public class Rock : Entity
+{
+    [Precision(0.1)] public mut SVec2 in -5..70 Pos;
+    public float Speed;
+    public float Drift;
+
+    public void Update(float dt)
+    {
+        Pos = new SVec2(Pos.X + Drift * dt, Pos.Y - Speed * dt);
+        if (Pos.Y < 0)
+        {
+            Destroy();
+            return;
+        }
+        foreach (var ship in Query<Ship>())
+        {
+            float dx = ship.X - Pos.X;
+            float dy = Arena.SHIP_Y - Pos.Y;
+            if (dx * dx + dy * dy < 1.0)
+            {
+                ship.Hit();
+                Destroy();
+                return;
+            }
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(2, Pos.X, Pos.Y);
+    }
+}

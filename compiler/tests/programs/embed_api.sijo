@@ -1,0 +1,68 @@
+// Embedding API test game (tests/embed.rs): Game.Start spawns entities, a parallel system can
+// panic at a tick the host chooses (Host.PanicTick), and Game.Update calls back into the host.
+public struct SVec2
+{
+    public float X;
+    public float Y;
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public static class Host
+{
+    [Pure] public static extern("embt_panic_tick") int PanicTick();
+    public static extern("embt_poke") void Poke(int tick);
+}
+
+public class Mover : Entity
+{
+    public mut SVec2 Pos;
+    public mut SVec2 Vel;
+    public mut int Id;
+    public mut List<int> Trail;
+
+    public void Update(float dt)
+    {
+        Pos = new SVec2(Pos.X + Vel.X * dt, Pos.Y + Vel.Y * dt);
+        if (Pos.X < 0 || Pos.X > 100)
+        {
+            Vel = new SVec2(-Vel.X, Vel.Y);
+        }
+        if (Time.Tick % 10 == 0)
+        {
+            Trail.Add(Time.Tick);
+        }
+        if (Time.Tick == Host.PanicTick() && Id == 777)
+        {
+            int k = Trail[1000];
+            Id = k;
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(Id % 5, Pos.X, Pos.Y);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 2000; i++)
+        {
+            Spawn(new Mover { Pos = new SVec2(Random.Float(0, 100), Random.Float(0, 100)), Vel = new SVec2(Random.Float(-5, 5), Random.Float(-5, 5)), Id = i, Trail = new List<int>() });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 25 == 0)
+        {
+            Host.Poke(Time.Tick);
+        }
+    }
+}

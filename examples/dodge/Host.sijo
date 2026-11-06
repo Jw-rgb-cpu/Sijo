@@ -1,0 +1,14 @@
+// Functions provided by the host program (host_term.c): keyboard state and a bell.
+public enum EKey
+{
+    Left,
+    Right,
+    Restart
+}
+
+public static class Host
+{
+    public static extern("dodge_key_down") bool IsKeyDown(EKey key);
+
+    public static extern("dodge_bell") void Bell();
+}

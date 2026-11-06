@@ -1,0 +1,152 @@
+// Arrays T[]: new T[n], initializers, Length, indexing, foreach, Array.Sort/Reverse/IndexOf/Fill/Copy,
+// arrays of strings, structs, chars, enums and nullable handles, arrays as entity fields (with
+// constant initializers, read by other entities: double-buffered like any other field), as
+// parameters and return values, string.Join. Expected output: the same program in C# (.NET 8).
+public struct Cell
+{
+    public int X;
+    public int Y;
+
+    public Cell(int x, int y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public enum ESuit
+{
+    Hearts,
+    Spades,
+    Clubs
+}
+
+public static class Grid
+{
+    public const int W = 4;
+
+    public static own int[] Squares(int n)
+    {
+        mut int[] r = new int[n];
+        for (int i = 0; i < n; i++)
+        {
+            r[i] = i * i;
+        }
+        return r;
+    }
+
+    public static int Sum(int[] xs)
+    {
+        mut int s = 0;
+        foreach (int x in xs)
+        {
+            s += x;
+        }
+        return s;
+    }
+
+    public static void Bump(ref int[] xs)
+    {
+        for (int i = 0; i < xs.Length; i++)
+        {
+            xs[i] += 1;
+        }
+    }
+
+    public static string Show(int[] xs) => "[" + string.Join(",", xs) + "]";
+}
+
+public class Board : Entity
+{
+    public mut int[] Cells = new int[Grid.W * Grid.W];
+    public string[] Names = { "ann", "bob", "cy" };
+    public mut float[] Weights = new float[] { 0.5, 1.5, 2.5 };
+    public mut Board?[] Peers = new Board?[2];
+    public int Id;
+    public mut int Seen;
+
+    public void Update(float dt)
+    {
+        int t = Time.Tick;
+        Cells[(t + Id) % Cells.Length] += Id + 1;
+        Weights[t % Weights.Length] *= 1.5;
+        // other boards' cells: the start-of-system snapshot
+        mut int seen = 0;
+        foreach (var b in Query<Board>())
+        {
+            if (b != this)
+            {
+                seen += Grid.Sum(b.Cells);
+                if (Peers[0] == null)
+                {
+                    Peers[0] = b;
+                }
+            }
+        }
+        Seen = seen;
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        mut int[] a = new int[5];
+        mut int[] b = { 5, 3, 9, 1, 7 };
+        var c = new int[] { 2, 4, 6 };
+        var d = new int[3] { 10, 20, 30 };
+        Print($"{a.Length} {b.Length} {c[2]} {d[1]} {Grid.Sum(b)} {Grid.Show(a)}");
+        Array.Sort(b);
+        Print(Grid.Show(b));
+        Array.Reverse(b);
+        Print($"{Grid.Show(b)} {Array.IndexOf(b, 3)} {Array.IndexOf(b, 4)}");
+        Array.Fill(a, 7);
+        a[1] = -1;
+        Print(Grid.Show(a));
+        int[] sq = Grid.Squares(6);
+        Print($"{Grid.Show(sq)} {Grid.Sum(sq)}");
+        mut int[] copy = Array.Copy(sq);
+        copy[0] = 100;
+        Print($"{sq[0]} {copy[0]}");
+        Grid.Bump(ref copy);
+        Print(Grid.Show(copy));
+        mut string[] words = { "the", "quick", "brown", "fox" };
+        Array.Sort(words);
+        Print($"{string.Join("-", words)} {words.Length}");
+        mut string[] empty = new string[2];
+        empty[1] = "x";
+        Print($"[{empty[0]}][{empty[1]}]");
+        mut Cell[] cells = new Cell[3];
+        cells[1] = new Cell(4, 5);
+        cells[2].X = 9;
+        Print($"{cells[0].X},{cells[0].Y} {cells[1].X},{cells[1].Y} {cells[2].X},{cells[2].Y}");
+        mut char[] letters = { 'd', 'a', 'c', 'b' };
+        Array.Sort(letters);
+        Print(string.Join("", letters));
+        mut ESuit[] suits = { ESuit.Clubs, ESuit.Hearts, ESuit.Spades };
+        Array.Sort(suits);
+        Print(string.Join(" ", suits));
+        mut int total = 0;
+        foreach (var x in new int[] { 1, 2, 3, 4 })
+        {
+            total += x;
+        }
+        Print($"total={total}");
+        for (int i = 0; i < 3; i++)
+        {
+            Spawn(new Board { Id = i });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 10 == 0)
+        {
+            foreach (var b in Query<Board>())
+            {
+                string peer = b.Peers[0] is Board p ? $"{p.Id}" : "none";
+                Print($"tick {Time.Tick} board {b.Id}: {Grid.Show(b.Cells)} seen={b.Seen} w={b.Weights[0]:F2},{b.Weights[1]:F2},{b.Weights[2]:F2} names={string.Join("/", b.Names)} peer={peer}");
+            }
+        }
+    }
+}

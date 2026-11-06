@@ -1,0 +1,47 @@
+// Strings as arguments of messages between entities: copied into the command buffer by value
+// (length + bytes) and re-created by the receiver; the last message applied wins (row order).
+public class Greeter : Entity
+{
+    public int Id;
+    public mut int Heard;
+    public mut string LastWord = "";
+
+    public void Update(float dt)
+    {
+        foreach (var g in Query<Greeter>())
+        {
+            if (g != this)
+            {
+                g.Hear($"hi #{Id} at {Time.Tick} — 안녕", Id);
+            }
+        }
+    }
+
+    public void Hear(string text, int from)
+    {
+        Heard += text.Length * 100 + from;
+        LastWord = text.Substring(0, 6);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            Spawn(new Greeter { Id = i });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 5 == 0)
+        {
+            foreach (var g in Query<Greeter>())
+            {
+                Print($"{Time.Tick} {g.Id} {g.Heard} [{g.LastWord}]");
+            }
+        }
+    }
+}

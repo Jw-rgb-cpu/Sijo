@@ -1,0 +1,211 @@
+// arena.sijo — a small top-down arena shooter.
+//
+// Written as plain single-player, single-threaded OOP code.
+// The compiler turns it into ECS tables, parallel systems, replicated network
+// state and frame-arena allocations. Run `sijoc explain examples/arena.sijo`.
+
+using Sijo;
+
+namespace Arena;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public float LengthSq => X * X + Y * Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+
+    public float Length() => Math.Sqrt(X * X + Y * Y);
+}
+
+public enum ETeam
+{
+    Red,
+    Blue
+}
+
+public static class Rules
+{
+    public const int MAX_HP = 100;
+    public const float ARENA_SIZE = 64;
+    public const float HIT_RADIUS = 1.5;
+    public const float HIT_RADIUS_SQ = HIT_RADIUS * HIT_RADIUS;   // evaluated at compile time
+
+    // pure function: the compiler evaluates calls with constant arguments at compile time
+    public static int DamageFor(int level) => 5 + level * 3;
+
+    public static SVec2 Wrap(SVec2 pos)
+    {
+        mut float x = pos.X;
+        mut float y = pos.Y;
+        if (x < 0)
+        {
+            x += ARENA_SIZE;
+        }
+        if (x >= ARENA_SIZE)
+        {
+            x -= ARENA_SIZE;
+        }
+        if (y < 0)
+        {
+            y += ARENA_SIZE;
+        }
+        if (y >= ARENA_SIZE)
+        {
+            y -= ARENA_SIZE;
+        }
+        return new SVec2(x, y);
+    }
+}
+
+public class Ship : Entity
+{
+    [Spatial, Precision(0.01)] public mut SVec2 in 0..64 Pos;
+    public SVec2 Vel;
+    public mut int in 0..Rules.MAX_HP Hp = Rules.MAX_HP;
+    public ETeam Side;
+    public mut float Cooldown;
+    public mut int Kills;
+    public mut int Shots;                    // written but never read: removed by dead-field elimination  // sijo-lint: disable-line L304
+    public mut Ship? Target;
+
+    public void Update(float dt)
+    {
+        steer();
+        Pos = Rules.Wrap(Pos + Vel * dt);
+        Cooldown -= dt;
+        if (Cooldown <= 0 && Target is Ship target)
+        {
+            SVec2 dir = target.Pos - Pos;
+            float len = dir.Length();
+            if (len > 0.001)
+            {
+                Spawn(new Bullet { Pos = Pos, Vel = dir * (20 / len), Owner = this, Damage = Rules.DamageFor(2) });
+                Shots++;
+            }
+            Cooldown = 0.6;
+        }
+        if (Hp <= 0)
+        {
+            // sijo-lint: disable-next-line L403 (a per-ship log line is the point of this demo)
+            Print($"tick {Time.Tick}: ship #{this} destroyed (kills={Kills})");
+            Destroy();
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(Side == ETeam.Red ? 1 : 2, Pos.X, Pos.Y);
+    }
+
+    // Client-side "player input": red pilots press the shield button every 2 seconds.
+    // Shield() modifies server state, so the compiler turns this call into an RPC:
+    // the client only sends the request; the server validates and executes it.
+    public client void Input()
+    {
+        if (Side == ETeam.Red && Time.Tick % 120 == 0)
+        {
+            Shield();
+        }
+    }
+
+    public void Shield()
+    {
+        Hp = Math.Min(Hp + 15, Rules.MAX_HP);
+    }
+
+    // Picks the nearest enemy. Reads other ships = snapshot reads.
+    void steer()
+    {
+        mut Ship? best = null;
+        mut float bestD = 1000000;
+        mut var enemies = new List<Ship>();      // never escapes -> frame arena, capacity = Count<Ship>()
+        foreach (var other in Query<Ship>())
+        {
+            if (other.Side != Side)
+            {
+                enemies.Add(other);
+            }
+        }
+        foreach (var enemy in enemies)
+        {
+            float distSq = (enemy.Pos - Pos).LengthSq;
+            if (distSq < bestD)
+            {
+                bestD = distSq;
+                best = enemy;
+            }
+        }
+        Target = best;
+    }
+}
+
+public class Bullet : Entity
+{
+    [Precision(0.01)] public mut SVec2 in 0..64 Pos;
+    public SVec2 Vel;
+    public Ship? Owner;
+    public int Damage = 5;
+    public mut float Life = 1.5;
+
+    public void Update(float dt)
+    {
+        Pos = Pos + Vel * dt;
+        Life -= dt;
+        if (Life <= 0 || Pos.X < 0 || Pos.Y < 0 || Pos.X > Rules.ARENA_SIZE || Pos.Y > Rules.ARENA_SIZE)
+        {
+            Destroy();
+            return;
+        }
+        foreach (var ship in Query<Ship>())
+        {
+            if (ship != Owner && (ship.Pos - Pos).LengthSq < Rules.HIT_RADIUS_SQ)
+            {
+                ship.Hp -= Damage;               // remote write -> deferred, saturated per command in a fixed order
+                if (Owner is Ship owner)
+                {
+                    owner.Kills += 1;
+                }
+                Destroy();
+                return;
+            }
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(3, Pos.X, Pos.Y);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 24; i++)
+        {
+            ETeam side = i % 2 == 0 ? ETeam.Red : ETeam.Blue;
+            float x = Random.Float(0, Rules.ARENA_SIZE);
+            float y = Random.Float(0, Rules.ARENA_SIZE);
+            Spawn(new Ship { Pos = new SVec2(x, y), Vel = new SVec2(Random.Float(-3, 3), Random.Float(-3, 3)), Side = side });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 60 == 0)
+        {
+            Print($"tick {Time.Tick}: ships={Count<Ship>()} bullets={Count<Bullet>()}");
+        }
+    }
+}

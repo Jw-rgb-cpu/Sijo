@@ -1,0 +1,78 @@
+// A Game.Update that spawns, in the same stage as an entity system that spawns: on shards the
+// entity system's spawns are merged at a barrier before Game.Update gets its slots (one process
+// gives them slots in system order).
+public struct SPos
+{
+    public float X;
+    public float Y;
+
+    public SPos(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public class Ship : Entity
+{
+    [Spatial] public mut SPos Pos;
+    public mut int Fired;
+
+    public void Update(float dt)
+    {
+        mut float x = Pos.X + 7;
+        if (x > 100)
+        {
+            x = 0;
+        }
+        Pos = new SPos(x, Pos.Y);
+        if ((Time.Tick + Fired) % 3 == 0)
+        {
+            Spawn(new Shot { Pos = Pos, Life = 4 });
+            Fired++;
+        }
+    }
+}
+
+public class Shot : Entity
+{
+    [Spatial] public mut SPos Pos;
+    public mut int Life;
+
+    public void Update(float dt)
+    {
+        Life -= 1;
+        if (Life <= 0)
+        {
+            Destroy();
+        }
+    }
+}
+
+public class Rock : Entity
+{
+    [Spatial] public mut SPos Pos;
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            Spawn(new Ship { Pos = new SPos(i * 2.5, 0) });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 5 == 0)
+        {
+            Spawn(new Rock { Pos = new SPos(Time.Tick % 100, 1) });
+        }
+        if (Time.Tick % 50 == 0)
+        {
+            Print($"tick {Time.Tick}: rocks={Count<Rock>()}");
+        }
+    }
+}

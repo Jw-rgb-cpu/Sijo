@@ -1,0 +1,143 @@
+// Value ranges and the e-graph optimizer: range types (every write saturates), immutable locals,
+// loop counters and array lengths are facts the optimizer uses to decide comparisons, drop or
+// narrow saturations, remove bounds checks and turn % and / by powers of two into masks and shifts.
+// The program prints the same with and without those optimizations (sijoc --no-egraph), on any
+// number of threads; the expected output was checked by hand against the rules in docs/02.
+public static class Calc
+{
+    public static int Bump(ref int x)
+    {
+        x += 1;
+        return 10;
+    }
+
+    public static int Half(int in 0..1000 v) => v / 2 + v % 4;
+
+    public static int in -5..5 Small(int v) => v * 3;
+
+    public static int Mixed(int a)
+    {
+        // wrapping arithmetic: reassociation must give the same bits
+        int big = a + 2147483647;
+        return big + 1 - a;
+    }
+
+    public static int Neg(int a) => a % 8 + a / 4;
+
+    public static int Table(int in 0..7 k)
+    {
+        int[] t = new int[8] { 3, 1, 4, 1, 5, 9, 2, 6 };
+        mut int s = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            s += t[i] * (i % 2 == 0 ? 1 : -1);
+        }
+        return s + t[k];
+    }
+
+    public static int Order(int x)
+    {
+        mut int y = x;
+        // C# order: y is read (5) before Bump changes it, then the call's 10
+        int r = y + Bump(ref y);
+        return r * 100 + y;
+    }
+
+    public static int Factor(int x)
+    {
+        mut int y = x;
+        // y is read (5), then Bump makes it 6: 5 * 10 + 6 * 2 (not y * (10 + 2))
+        int r = y * Bump(ref y) + y * 2;
+        return r;
+    }
+
+    public static int Lazy(int x)
+    {
+        mut int calls = 0;
+        bool a = x < 0 && Bump(ref calls) > 0;
+        bool b = false && Bump(ref calls) > 0;
+        bool c = Bump(ref calls) > 0 || true;
+        return calls * 8 + (a ? 4 : 0) + (b ? 2 : 0) + (c ? 1 : 0);
+    }
+}
+
+public class Unit : Entity
+{
+    public mut int in 0..100 Hp = 90;
+    public mut int in -10..10 Heat;
+    public int in 1..4 Level = 3;
+    public mut int Seen;
+    public mut int Log;
+
+    public int Inc()
+    {
+        Seen += 1;
+        return 1;
+    }
+
+    public void Update(float dt)
+    {
+        // Hp is in 0..100: these comparisons are decided at compile time
+        if (Hp >= 0 && Hp <= 100)
+        {
+            Seen += 1;
+        }
+        if (Hp > 100)
+        {
+            Seen += 1000;
+        }
+        // Inc changes Seen between the two reads
+        Log += Seen * Inc() + Seen * 2;
+        // only the lower bound can be crossed / only the upper one
+        Hp -= 7;
+        Heat += Level;
+        mut int in 0..50 k = Hp / 2;
+        k += 20;
+        int lv = Level * 2 - 1;
+        Log = Log * 31 + Hp * 7 + Heat * 3 + k + lv % 4 + (Level & 3) + Math.Abs(Heat - 20) + Math.Min(Hp, 200) + Math.Max(Level, -3);
+        if (Time.Tick % 16 == 0)
+        {
+            Hp = 100;
+            Heat = -10;
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            Spawn(new Unit { Hp = 30 * i + 5 });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            // z is 0, but not a compile-time constant: the calls run at run time
+            int z = Time.Tick - 1;
+            Print($"half {Calc.Half(1000 + z)} {Calc.Half(7 + z)} {Calc.Half(z - 50)}");
+            Print($"small {Calc.Small(1 + z)} {Calc.Small(2 + z)} {Calc.Small(z - 9)}");
+            Print($"mixed {Calc.Mixed(5 + z)} {Calc.Mixed(z - 2147483647 - 1)} {Calc.Mixed(z + 2147483647)}");
+            Print($"neg {Calc.Neg(z - 13)} {Calc.Neg(z + 13)} {Calc.Neg(z - 1)}");
+            Print($"table {Calc.Table(z)} {Calc.Table(z + 5)} {Calc.Table(z + 7)} {Calc.Table(z + 70)}");
+            Print($"order {Calc.Order(5 + z)}");
+            Print($"factor {Calc.Factor(5 + z)}");
+            Print($"lazy {Calc.Lazy(3 + z)} {Calc.Lazy(z - 3)}");
+        }
+        if (Time.Tick % 20 == 0)
+        {
+            mut int s = 0;
+            mut int h = 0;
+            foreach (var u in Query<Unit>())
+            {
+                s += u.Log % 1000;
+                h += u.Hp * 1000 + u.Heat + u.Seen;
+            }
+            Print($"tick {Time.Tick}: {s} {h}");
+        }
+    }
+}

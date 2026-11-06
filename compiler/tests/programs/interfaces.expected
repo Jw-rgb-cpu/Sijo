@@ -1,0 +1,9 @@
+areas 15 6
+t1: 4 damageable, 4 alive, 1 healable; orcs 1004, healer 5
+t2: 4 damageable, 4 alive, 1 healable; orcs 903, healer 4
+t3: 4 damageable, 4 alive, 1 healable; orcs 903, healer 4
+t4: 4 damageable, 4 alive, 1 healable; orcs 903, healer 5
+t5: 4 damageable, 4 alive, 1 healable; orcs 903, healer 5
+t6: 3 damageable, 3 alive, 1 healable; orcs 903, healer 4
+t7: 3 damageable, 3 alive, 1 healable; orcs 903, healer 6
+t8: 3 damageable, 3 alive, 1 healable; orcs 903, healer 5

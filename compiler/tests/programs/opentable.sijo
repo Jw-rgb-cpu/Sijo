@@ -1,0 +1,150 @@
+// A class that can reach 64 combinations of components (six independent ones): more than the 16
+// tables a class may have, so Hero keeps one open table with a bit per component (docs/04
+// §4.4.1). Every tick hero `Id` gains or loses component j so that it has it exactly when bit j of
+// (Id + tick) is set; Game.Update checks Has<C>(), Get<C>(), Query<Hero, C>() and Count<C>()
+// against the bits each hero applied, and prints what component systems, a list, a string and a
+// component coroutine did (tests/components.rs: open_tables_hold_more_than_sixteen_combinations).
+public component C0
+{
+    public mut int N;
+
+    public void Update(float dt)
+    {
+        N += 1;
+    }
+}
+
+public component C1
+{
+    public mut int N;
+
+    public void Update(float dt)
+    {
+        N += 2;
+    }
+}
+
+public component C2
+{
+    public mut List<int> Ticks;
+
+    public void Update(float dt)
+    {
+        Ticks.Add(Time.Tick);
+    }
+}
+
+public component C3
+{
+    public mut string Name = "c3";
+
+    public void Update(float dt)
+    {
+        Name = $"{Name}+";
+    }
+}
+
+public component C4
+{
+    public mut int Steps;
+
+    public async void Update(float dt)
+    {
+        Steps += 1;
+        await NextTick();
+        Steps += 10;
+    }
+}
+
+public component C5
+{
+    public mut int N;
+}
+
+public class Hero : Entity
+{
+    public int Id;
+    public mut int Bits;
+    public mut int Gained;
+
+    public void Update(float dt)
+    {
+        int want = (Id + Time.Tick) & 63;
+        Bits = want;
+        // gain a component only when it is missing (Add would restart its values)
+        if ((want & 1) != 0) { if (!Has<C0>()) { Add(new C0 { }); Gained += 1; } } else { Remove<C0>(); }
+        if ((want & 2) != 0) { if (!Has<C1>()) { Add(new C1 { N = 100 }); Gained += 1; } } else { Remove<C1>(); }
+        if ((want & 4) != 0) { if (!Has<C2>()) { Add(new C2 { }); Gained += 1; } } else { Remove<C2>(); }
+        if ((want & 8) != 0) { if (!Has<C3>()) { Add(new C3 { Name = $"h{Id}" }); Gained += 1; } } else { Remove<C3>(); }
+        if ((want & 16) != 0) { if (!Has<C4>()) { Add(new C4 { }); Gained += 1; } } else { Remove<C4>(); }
+        if ((want & 32) != 0) { if (!Has<C5>()) { Add(new C5 { N = Id }); Gained += 1; } } else { Remove<C5>(); }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            Spawn(new Hero { Id = i });
+        }
+        // spawned with components: the bits it starts with
+        Spawn(new Hero { Id = 1000 }, new C1 { N = 7 }, new C5 { N = 5 });
+    }
+
+    public static void Update(float dt)
+    {
+        mut int bad = 0;
+        mut int heroes = 0;
+        foreach (var h in Query<Hero>())
+        {
+            if (h.Id == 1000)
+            {
+                continue;
+            }
+            heroes += 1;
+            int b = h.Bits;
+            if (h.Has<C0>() != ((b & 1) != 0)) { bad += 1; }
+            if (h.Has<C1>() != ((b & 2) != 0)) { bad += 1; }
+            if (h.Has<C2>() != ((b & 4) != 0)) { bad += 1; }
+            if (h.Has<C3>() != ((b & 8) != 0)) { bad += 1; }
+            if (h.Has<C4>() != ((b & 16) != 0)) { bad += 1; }
+            if (h.Has<C5>() != ((b & 32) != 0)) { bad += 1; }
+            if ((h.Get<C5>() is C5 c) != ((b & 32) != 0)) { bad += 1; }
+        }
+        mut int n0 = 0;
+        mut int s0 = 0;
+        foreach (var (h, c) in Query<Hero, C0>())
+        {
+            n0 += 1;
+            s0 += c.N;
+        }
+        mut int s1 = 0;
+        foreach (var (h, c) in Query<Hero, C1>())
+        {
+            s1 += c.N;
+        }
+        mut int l2 = 0;
+        foreach (var (h, c) in Query<Hero, C2>())
+        {
+            l2 += c.Ticks.Count;
+        }
+        mut int s3 = 0;
+        foreach (var (h, c) in Query<Hero, C3>())
+        {
+            s3 += c.Name.Length;
+        }
+        mut int s4 = 0;
+        foreach (var c in Query<C4>())
+        {
+            s4 += c.Steps;
+        }
+        mut int both = 0;
+        foreach (var (h, a, z) in Query<Hero, C1, C5>())
+        {
+            both += 1;
+        }
+        Print($"t{Time.Tick}: heroes {heroes} bad {bad} | C0 {Count<C0>()}={n0} sum {s0} | C1 {Count<C1>()} sum {s1} | C2 {Count<C2>()} ticks {l2} | C3 {Count<C3>()} len {s3} | C4 {Count<C4>()} steps {s4} | C5 {Count<C5>()} with C1 {both}");
+    }
+}

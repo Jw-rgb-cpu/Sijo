@@ -1,0 +1,92 @@
+// A crowd large enough (12000 > SIJO_GRID_PAR) for the proximity grid to be built by several threads:
+// the parallel counting sort must give the full scan's results (tests/e2e.rs). countClose is a
+// helper with its own distance loop: called by Update it uses the grid Update builds; called by
+// Ping, a message applied after the system, it scans (the grid is dropped when the system ends).
+// countReach uses each mote's own Reach (0 to 2.5): the grid's cell comes from the largest one.
+public struct SVec2
+{
+    public float X;
+    public float Y;
+    public SVec2(float x, float y) { X = x; Y = y; }
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float k) => new SVec2(a.X * k, a.Y * k);
+    public float LengthSq => X * X + Y * Y;
+}
+
+public class Mote : Entity
+{
+    public mut SVec2 Pos;
+    public mut SVec2 Vel;
+    public mut int Near;
+    public mut int Close;
+    public mut int Pinged;
+    public float Reach;
+    public mut int Reached;
+
+    int countReach()
+    {
+        mut int c = 0;
+        foreach (var o in Query<Mote>())
+        {
+            if ((o.Pos - Pos).LengthSq <= Reach * Reach)
+            {
+                c++;
+            }
+        }
+        return c;
+    }
+
+    int countClose()
+    {
+        mut int c = 0;
+        foreach (var o in Query<Mote>())
+        {
+            if ((o.Pos - Pos).LengthSq < 1)
+            {
+                c++;
+            }
+        }
+        return c;
+    }
+
+    public void Ping()
+    {
+        Pinged += countClose();
+    }
+
+    public void Update(float dt)
+    {
+        mut int near = 0;
+        mut SVec2 push = new SVec2(0, 0);
+        foreach (var o in Query<Mote>())
+        {
+            SVec2 d = o.Pos - Pos;
+            if (d.LengthSq < 4)
+            {
+                near++;
+                push = push - d * 0.01f;
+                if (near == 7)
+                {
+                    o.Ping();
+                }
+            }
+        }
+        Near = near;
+        Close = countClose();
+        Reached = countReach();
+        Vel = (Vel + push) * 0.98f;
+        Pos = Pos + Vel * dt;
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 12000; i++)
+        {
+            Spawn(new Mote { Pos = new SVec2(Random.Float(0, 200), Random.Float(0, 200)), Vel = new SVec2(Random.Float(-1, 1), Random.Float(-1, 1)), Reach = i % 5 == 0 ? 0 : Random.Float(0, 2.5f) });
+        }
+    }
+}

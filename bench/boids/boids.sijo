@@ -1,0 +1,149 @@
+// boids.sijo — benchmark workload "boids" (O(N^2) neighbour scan, Jacobi semantics).
+//
+// Identical to examples/boids.sijo except:
+//  * no client Render method, so nothing is replicated (the benchmark measures
+//    the simulation, not the networking layer);
+//  * initial positions come from an integer LCG instead of Random.Float, so the
+//    C/C++ baselines can reproduce them bit for bit;
+//  * Game.Update prints an order-independent checksum every 100 ticks.
+// The harness (bench/run.py) substitutes COUNT for each size variant.
+
+using Sijo;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public float LengthSq => X * X + Y * Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+}
+
+public static class Flock
+{
+    public const int COUNT = 1000;
+    public const float WORLD = 200;
+    public const float VIEW_RADIUS = 12;
+    public const float MAX_SPEED = 30;
+    public const float VIEW_SQ = VIEW_RADIUS * VIEW_RADIUS;
+
+    public static SVec2 Limit(SVec2 vec, float max)
+    {
+        float l2 = vec.LengthSq;
+        if (l2 > max * max)
+        {
+            return vec * (max / Math.Sqrt(l2));
+        }
+        return vec;
+    }
+
+    public static int Next(int s) => s * 1664525 + 1013904223;
+
+    public static float Unit(int s) => (float)((s >> 8) & 65535) / 65536.0;
+
+    public static int Q(float v) => (int)(v * 8388608.0);
+}
+
+public class Boid : Entity
+{
+    public mut SVec2 in 0..200 Pos;
+    public mut SVec2 Vel;
+    public mut int Neighbours;
+
+    public void Update(float dt)
+    {
+        mut SVec2 center = new SVec2(0, 0);
+        mut SVec2 align = new SVec2(0, 0);
+        mut SVec2 away = new SVec2(0, 0);
+        mut int count = 0;
+        foreach (var other in Query<Boid>())
+        {
+            if (other == this)
+            {
+                continue;
+            }
+            SVec2 offset = other.Pos - Pos;
+            float distSq = offset.LengthSq;
+            if (distSq < Flock.VIEW_SQ)
+            {
+                center = center + other.Pos;
+                align = align + other.Vel;
+                if (distSq < 9)
+                {
+                    away = away - offset;
+                }
+                count++;
+            }
+        }
+        Neighbours = count;
+        if (count > 0)
+        {
+            float inv = 1.0 / count;
+            SVec2 toCenter = center * inv - Pos;
+            SVec2 avgVel = align * inv - Vel;
+            Vel = Vel + toCenter * 0.6 * dt + avgVel * 1.5 * dt + away * 4 * dt;
+        }
+        Vel = Flock.Limit(Vel, Flock.MAX_SPEED);
+        Pos = Pos + Vel * dt;
+        // bounce off the walls (Pos is also clamped to its range, in 0..200)
+        if (Pos.X <= 0 || Pos.X >= Flock.WORLD)
+        {
+            Vel = new SVec2(-Vel.X, Vel.Y);
+        }
+        if (Pos.Y <= 0 || Pos.Y >= Flock.WORLD)
+        {
+            Vel = new SVec2(Vel.X, -Vel.Y);
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < Flock.COUNT; i++)
+        {
+            int s1 = Flock.Next(i * 7919 + 17);
+            int s2 = Flock.Next(s1);
+            int s3 = Flock.Next(s2);
+            int s4 = Flock.Next(s3);
+            Spawn(new Boid
+            {
+                Pos = new SVec2(Flock.Unit(s1) * Flock.WORLD, Flock.Unit(s2) * Flock.WORLD),
+                Vel = new SVec2(Flock.Unit(s3) * 20 - 10, Flock.Unit(s4) * 20 - 10)
+            });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 100 == 0)
+        {
+            mut int crowded = 0;
+            mut int h = 0;
+            foreach (var boid in Query<Boid>())
+            {
+                if (boid.Neighbours > 6)
+                {
+                    crowded++;
+                }
+                mut int e = Flock.Q(boid.Pos.X);
+                e = e * 31 + Flock.Q(boid.Pos.Y);
+                e = e * 31 + Flock.Q(boid.Vel.X);
+                e = e * 31 + Flock.Q(boid.Vel.Y);
+                e = e * 31 + boid.Neighbours;
+                h += (e ^ 1540483477) * 668265261;
+            }
+            Print($"bench tick={Time.Tick} n={Count<Boid>()} crowded={crowded} h={h}");
+        }
+    }
+}

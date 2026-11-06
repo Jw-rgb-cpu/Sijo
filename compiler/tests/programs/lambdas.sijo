@@ -1,0 +1,117 @@
+// Lambdas as arguments of list and array methods, compiled inline at the call site (captured
+// locals, fields and parameters work as in C#): Sort with a comparison (stable), Find/FindLast/
+// FindIndex/FindLastIndex, Exists/TrueForAll, RemoveAll, ForEach (statement), LINQ-style
+// Any/All/Count/Sum/Min/Max/First/Last/FirstOrDefault/Where/Select/OrderBy(Descending)/ToList/
+// ToArray, and Array.Sort/Find/Exists/FindIndex/TrueForAll/ForEach. Expected output: C# (.NET 8)
+// semantics, except that List.Sort with a comparison is stable here.
+public struct Item
+{
+    public string Name;
+    public int Weight;
+    public float Price;
+
+    public Item(string name, int weight, float price)
+    {
+        Name = name;
+        Weight = weight;
+        Price = price;
+    }
+}
+
+public class Unit : Entity
+{
+    public int Id;
+    public mut int Hp;
+    public mut List<int> Log;
+    public mut int Picked;
+
+    public void Update(float dt)
+    {
+        Log.Add(Time.Tick * Id % 7);
+        int limit = 3;
+        Log.RemoveAll(x => x > limit + Id % 2);
+        // the weakest other unit, by a lambda over a query result list
+        mut var others = new List<Unit>();
+        foreach (var u in Query<Unit>())
+        {
+            if (u != this)
+            {
+                others.Add(u);
+            }
+        }
+        var weakest = others.OrderBy(u => u.Hp).FirstOrDefault();
+        Picked = weakest is Unit w ? w.Id : -1;
+        Hp = (Hp + Log.Sum() + Id) % 50;
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        mut var xs = new List<int>();
+        foreach (int v in new int[] { 5, 3, 9, 1, 7, 3, 8 })
+        {
+            xs.Add(v);
+        }
+        int bound = 4;
+        Print($"{xs.Find(x => x > bound)} {xs.FindLast(x => x > bound)} {xs.FindIndex(x => x == 3)} {xs.FindLastIndex(x => x == 3)} {xs.FindIndex(x => x > 100)}");
+        Print($"{xs.Exists(x => x % 2 == 0)} {xs.TrueForAll(x => x > 0)} {xs.Any(x => x > 8)} {xs.All(x => x < 9)} {xs.Any()} {xs.Count(x => x >= bound)} {xs.Count()}");
+        Print($"{xs.Sum()} {xs.Sum(x => x * 2)} {xs.Max()} {xs.Min()} {xs.Max(x => -x)} {xs.First()} {xs.Last()} {xs.First(x => x > 6)} {xs.FirstOrDefault(x => x > 100)}");
+        var evens = xs.Where(x => x % 2 == 1).Select(x => x * 10);
+        Print(string.Join(",", evens));
+        var names = xs.Select(x => $"n{x}");
+        Print(string.Join(" ", names));
+        var desc = xs.OrderByDescending(x => x);
+        var copy = xs.ToList();
+        xs.Sort((a, b) => a - b);
+        Print($"{string.Join(",", xs)} | {string.Join(",", desc)} | {string.Join(",", copy)}");
+        int removed = xs.RemoveAll(x => x < bound);
+        Print($"removed {removed}: {string.Join(",", xs)}");
+        mut int sum = 0;
+        xs.ForEach(x => sum += x);
+        xs.ForEach(x =>
+        {
+            if (x > 7)
+            {
+                Print($"big {x}");
+            }
+        });
+        Print($"sum {sum}");
+        mut var items = new List<Item>();
+        items.Add(new Item("rope", 3, 2.5));
+        items.Add(new Item("axe", 7, 9.0));
+        items.Add(new Item("bread", 1, 0.5));
+        items.Add(new Item("gem", 1, 50.0));
+        items.Add(new Item("lamp", 3, 4.0));
+        // stable: rope before lamp, bread before gem
+        items.Sort((a, b) => a.Weight.CompareTo(b.Weight));
+        Print(string.Join(" ", items.Select(i => i.Name)));
+        var byPrice = items.OrderBy(i => i.Price);
+        Print($"{byPrice[0].Name} {byPrice[4].Name} {items.Max(i => i.Price):F1} {items.Sum(i => i.Weight)} {items.Find(i => i.Name.StartsWith("l")).Name}");
+        var byName = items.OrderBy(i => i.Name);
+        Print(string.Join(",", byName.Select(i => i.Name)));
+        mut int[] arr = { 4, 8, 15, 16, 23, 42 };
+        Array.Sort(arr, (a, b) => b - a);
+        Print($"{string.Join(",", arr)} {Array.Find(arr, x => x % 5 == 0)} {Array.FindIndex(arr, x => x < 10)} {Array.Exists(arr, x => x == 16)} {Array.TrueForAll(arr, x => x > 3)}");
+        mut int total = 0;
+        Array.ForEach(arr, x => total += x);
+        int[] small = arr.Where(x => x < 20).ToArray();
+        Print($"{total} {arr.Sum()} {small.Length} {arr.Select(x => x % 3).Count(r => r == 0)}");
+        for (int i = 0; i < 4; i++)
+        {
+            Spawn(new Unit { Id = i, Hp = 10 + i * 7 });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 5 == 0)
+        {
+            foreach (var u in Query<Unit>())
+            {
+                Print($"tick {Time.Tick} unit {u.Id}: hp={u.Hp} picked={u.Picked} log={string.Join(",", u.Log)}");
+            }
+        }
+    }
+}

@@ -1,0 +1,10 @@
+enum Blue 6 Green
+ref 11 out 42
+list 0 10 276 16 True False
+float 0.33333334 0.3 100 1E-07
+bool True 1
+break 4
+deferred hp 24
+jacobi x 396
+virtual 36
+atomic wallets=1 gold=5 tries=0

@@ -1,0 +1,69 @@
+// Structured concurrency for coroutines: await Race(...) (the first arm to finish wins and its index
+// is the value; the other arms are cancelled) and await Sync(...) (all arms run until every one has
+// finished). Arms: async methods of this entity (with arguments), Wait(seconds), Until(condition),
+// NextTick(). Each tick the arms run in order; Wait(t) finishes after ceil(t / dt) ticks as a
+// lone await does. Expected output: the timeline below (60 Hz).
+public class Guard : Entity
+{
+    public int Id;
+    public mut float X;
+    public mut int Steps;
+    public mut int Blinks;
+    public mut string Trace = "";
+
+    public async void MoveTo(float target)
+    {
+        while (X < target)
+        {
+            X += 1;
+            Steps++;
+            await NextTick();
+        }
+    }
+
+    public async void Blink(int n)
+    {
+        for (int i = 0; i < n; i++)
+        {
+            Blinks++;
+            await Wait(0.05f);
+        }
+    }
+
+    public async void Run()
+    {
+        // guard 0 walks 5 steps (wins), guard 1 needs 8 (the 6-tick timeout wins)
+        mut int w = await Race(MoveTo(5 + Id * 3), Wait(0.1f));
+        Trace += $"r{w}@{Time.Tick}";
+        // all three: two blinks of 3 ticks, two more steps, and Steps >= 7
+        await Sync(Blink(2), MoveTo(X + 2), Until(Steps >= 7));
+        Trace += $" s@{Time.Tick}";
+        w = await Race(Until(Blinks > 10), NextTick());
+        Trace += $" n{w}@{Time.Tick}";
+        // a cancelled arm starts over the next time it is awaited
+        w = await Race(Wait(0.02f), MoveTo(X + 100));
+        Trace += $" c{w}@{Time.Tick}";
+        await MoveTo(X + 1);
+        Trace += $" m@{Time.Tick}";
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Guard { Id = 0 });
+        Spawn(new Guard { Id = 1 });
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 5 == 0 || Time.Tick == 30)
+        {
+            foreach (var g in Query<Guard>())
+            {
+                Print($"t{Time.Tick} g{g.Id} x={g.X} steps={g.Steps} blinks={g.Blinks} [{g.Trace}]");
+            }
+        }
+    }
+}

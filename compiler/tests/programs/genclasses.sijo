@@ -1,0 +1,276 @@
+// Generic entity classes: every instance (Pool<int>, Pool<SVec2>, Hunter<Orc>, ...) is an entity
+// class of its own, with its own archetype, systems, replication and saved state.
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public interface IScore
+{
+    int Score();
+}
+
+// a generic class with a list of T, a field of type T, methods using T and an interface
+public class Pool<T> : Entity, IScore where T : struct
+{
+    public mut List<T> Items;
+    public T Seed;
+    public mut int Ticks;
+
+    public void Update(float dt)
+    {
+        Ticks += 1;
+        if (Items.Count < 3)
+        {
+            Items.Add(Seed);
+        }
+    }
+
+    public void Put(T x)
+    {
+        Items.Add(x);
+    }
+
+    public virtual int Score() => Items.Count;
+
+    public static int Cap() => 3;
+}
+
+// a class derived from an instance, overriding a method of the generic base
+public class IntPool : Pool<int>
+{
+    public mut int Sum;
+
+    public void Update(float dt)
+    {
+        base.Update(dt);
+        Sum = 0;
+        foreach (var x in Items)
+        {
+            Sum += x;
+        }
+    }
+
+    public override int Score() => base.Score() * 10 + Sum;
+}
+
+public abstract class Unit : Entity
+{
+    public mut int in 0..100 Hp = 100;
+    public mut int Taken;
+
+    public virtual void Hit(int n)
+    {
+        Hp -= n;
+        Taken += n;
+    }
+
+    public client void Render()
+    {
+        Draw.Text(0, 0, $"{Hp}");
+    }
+}
+
+public class Orc : Unit
+{
+}
+
+public class Elf : Unit
+{
+    public override void Hit(int n)
+    {
+        base.Hit(n / 2);
+    }
+}
+
+// two instances (Hunter<Orc>, Hunter<Elf>) query their prey and write to it remotely
+public class Hunter<T> : Entity where T : Unit
+{
+    public mut T? Prey;
+    public mut int Shots;
+    public mut string Label = "hunter";
+
+    public void Update(float dt)
+    {
+        if (Prey is T p)
+        {
+            p.Hit(4);
+            p.Hp -= 1;
+            Shots += 1;
+            return;
+        }
+        foreach (var u in Query<T>())
+        {
+            Prey = u;
+            Label = $"hunting after {Shots}";
+            break;
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Text(1, 1, $"{Label} {Shots}");
+    }
+}
+
+// a generic class derived from a non-generic one, overriding its virtual method
+public class Marker : Entity
+{
+    public mut int Marks;
+
+    public virtual void Mark()
+    {
+        Marks += 1;
+    }
+}
+
+public class Labeled<T> : Marker
+{
+    public T Value;
+    public mut List<T> History;
+
+    public override void Mark()
+    {
+        Marks += 2;
+        History.Add(Value);
+    }
+}
+
+// two type parameters, a coroutine and client code: First and Second are replicated
+public class Pair<A, B> : Entity
+{
+    public mut A First;
+    public B Second;
+    public mut int Steps;
+
+    public async void Run()
+    {
+        while (Steps < 3)
+        {
+            await Wait(0.05f);
+            Steps += 1;
+            First = Second;
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Text(3, 3, $"{First} {Second} {Steps}");
+    }
+}
+
+public class Home : Entity
+{
+    public Pool<int>? Mine;
+    public mut int Seen;
+
+    public void Update(float dt)
+    {
+        if (Mine is Pool<int> p)
+        {
+            Seen = p.Items.Count;
+            p.Put(100);
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Text(2, 2, $"{Seen}");
+    }
+}
+
+public static class Make
+{
+    // a generic method instantiating a generic class with its own type argument
+    public static Pool<T>? PoolOf<T>(T seed) where T : struct
+    {
+        return Spawn(new Pool<T> { Seed = seed });
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Pool<int>? ints = Make.PoolOf(5);
+        Make.PoolOf(new SVec2(1, 2));
+        Spawn(new IntPool { Seed = 2 });
+        Spawn(new Home { Mine = ints });
+        Spawn(new Orc { });
+        Spawn(new Elf { });
+        Spawn(new Hunter<Orc> { });
+        Spawn(new Hunter<Elf> { });
+        Spawn(new Labeled<string> { Value = "a" });
+        Spawn(new Labeled<int> { Value = 7 });
+        Spawn(new Pair<string, string> { First = "a", Second = "b" });
+        Spawn(new Pair<float, int> { First = 0.5f, Second = 4 });
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var m in Query<Marker>())
+        {
+            m.Mark();
+        }
+        if (Time.Tick % 3 != 0)
+        {
+            return;
+        }
+        Print($"tick {Time.Tick}: pools {Count<Pool<int>>()} {Count<Pool<SVec2>>()} cap {Pool<int>.Cap()}");
+        foreach (var s in Query<IScore>())
+        {
+            if (s is IntPool ip)
+            {
+                Print($"  IntPool score={s.Score()} sum={ip.Sum}");
+            }
+            else if (s is Pool<int> pi)
+            {
+                Print($"  Pool<int> score={s.Score()} items={pi.Items.Count} ticks={pi.Ticks}");
+            }
+            else if (s is Pool<SVec2> pv)
+            {
+                Print($"  Pool<SVec2> score={s.Score()} last={pv.Items[pv.Items.Count - 1].Y}");
+            }
+        }
+        foreach (var u in Query<Unit>())
+        {
+            Print($"  unit hp={u.Hp} taken={u.Taken}");
+        }
+        foreach (var h in Query<Hunter<Orc>>())
+        {
+            Print($"  Hunter<Orc> {h.Label} shots={h.Shots}");
+        }
+        foreach (var h in Query<Hunter<Elf>>())
+        {
+            Print($"  Hunter<Elf> {h.Label} shots={h.Shots}");
+        }
+        foreach (var l in Query<Labeled<string>>())
+        {
+            Print($"  Labeled<string> marks={l.Marks} history={l.History.Count} value={l.Value}");
+        }
+        foreach (var l in Query<Labeled<int>>())
+        {
+            Print($"  Labeled<int> marks={l.Marks} history={l.History.Count} value={l.Value}");
+        }
+        foreach (var p in Query<Pair<string, string>>())
+        {
+            Print($"  Pair<string, string> {p.First} {p.Second} steps={p.Steps}");
+        }
+        foreach (var p in Query<Pair<float, int>>())
+        {
+            Print($"  Pair<float, int> {p.First} {p.Second} steps={p.Steps}");
+        }
+        foreach (var h in Query<Home>())
+        {
+            Print($"  home seen={h.Seen}");
+        }
+    }
+}

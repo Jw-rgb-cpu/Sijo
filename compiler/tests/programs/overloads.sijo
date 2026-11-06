@@ -1,0 +1,157 @@
+// Method overloading: one name, several parameter lists. The call picks the overload its arguments
+// fit best (exact type over a widening, a derived class over its base, the most derived class for
+// null); virtual dispatch goes by name and parameter types, so an override replaces one overload;
+// and one class implements two instances of a generic interface whose methods take T
+// (tests/e2e.rs, expected output in overloads.expected).
+public interface IContainer<T>
+{
+    void Put(T x);
+    int Count();
+}
+
+public interface ILog
+{
+    void Log(int x);
+    // a default implementation calls the other overload
+    void Log(string s) { Log(s.Length * 100); }
+}
+
+public struct SVec
+{
+    public float X;
+    public float Y;
+    public SVec(float x, float y) { X = x; Y = y; }
+    public SVec(float both) { X = both; Y = both; }
+    public float Dot(SVec o) => X * o.X + Y * o.Y;
+    public float Dot(float x, float y) => X * x + Y * y;
+    public static SVec Of(int n) => new SVec(n, n);
+    public static SVec Of(float x, float y) => new SVec(x, y);
+}
+
+public abstract class Unit : Entity
+{
+    public mut int Hp = 100;
+    public mut int Score;
+
+    public void Hit(int n) { Hp -= n; }
+    public void Hit(float scale) { Hp -= (int)(scale * 10); }
+    public void Hit(int n, int times) { Hp -= n * times; }
+
+    public virtual int Worth(int x) => x;
+    public virtual int Worth(string s) => s.Length;
+}
+
+public class Orc : Unit
+{
+    // overrides one overload; the other stays the base class's
+    public override int Worth(int x) => x * 10;
+    // a new overload in the derived class
+    public int Worth(bool b) => b ? 7 : 8;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 2)
+        {
+            foreach (var u in Query<Unit>())
+            {
+                if (u != this)
+                {
+                    u.Hit(3);
+                    u.Hit(0.5f);
+                    u.Hit(2, 4);
+                }
+            }
+        }
+        Score = Worth(2) + Worth("abc") + Worth(true);
+    }
+}
+
+public class Elf : Unit
+{
+    public void Update(float dt)
+    {
+        Score = Worth(2) + Worth("abcd");
+    }
+}
+
+// two instances of one generic interface: Put(int) and Put(string) are overloads; Count() is
+// the same method for both
+public class Crate : Entity, IContainer<int>, IContainer<string>, ILog
+{
+    public mut int Sum;
+    public mut int Items;
+    public mut int Logged;
+
+    public void Put(int x) { Sum += x; Items++; }
+    public void Put(string s) { Sum += s.Length; Items++; }
+    public int Count() => Items;
+    public void Log(int x) { Logged += x; }
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            Log("hello");
+            Log(3);
+        }
+    }
+}
+
+public static class Text
+{
+    public static string Describe(int x) => $"int {x}";
+    public static string Describe(float x) => $"float {x}";
+    public static string Describe(string s) => $"string {s}";
+    public static string Describe(Unit? u) => "unit";
+    public static string Describe(Orc? o) => "orc";
+    public static string Describe(int a, int b) => $"pair {a} {b}";
+
+    public static bool Read(string s, out int v) => int.TryParse(s, out v);
+    public static bool Read(string s, out float v) => float.TryParse(s, out v);
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Print(Text.Describe(3));
+        Print(Text.Describe(2.5f));
+        Print(Text.Describe('A'));
+        Print(Text.Describe("hi"));
+        Print(Text.Describe(1, 2));
+        Print(Text.Describe(null));
+        Orc? o = Spawn(new Orc());
+        Unit? u = o;
+        Print(Text.Describe(o));
+        Print(Text.Describe(u));
+        Spawn(new Elf());
+        Spawn(new Crate());
+        if (Text.Read("42", out int i) && Text.Read("1.5", out float f))
+        {
+            Print($"read {i} {f}");
+        }
+        var a = new SVec(1, 2);
+        var b = new SVec(3);
+        Print($"dot {a.Dot(b)} {a.Dot(2, 0.5f)} {SVec.Of(4).X} {SVec.Of(1.5f, 2).Y}");
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var c in Query<IContainer<int>>())
+        {
+            c.Put(Time.Tick);
+        }
+        foreach (var c in Query<IContainer<string>>())
+        {
+            c.Put("ab");
+        }
+        foreach (var c in Query<Crate>())
+        {
+            Print($"t{Time.Tick} crate sum {c.Sum} items {c.Count()} logged {c.Logged}");
+        }
+        foreach (var x in Query<Unit>())
+        {
+            Print($"t{Time.Tick} {Text.Describe(x)} hp {x.Hp} score {x.Score}");
+        }
+    }
+}

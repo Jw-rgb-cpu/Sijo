@@ -1,0 +1,51 @@
+// Client RPCs with string arguments: they travel as length + bytes (lengths little-endian on every
+// platform, the values around them byte-swapped on big-endian machines) and are re-created on the
+// server. Hp depends on the text, so the replicated state hash checks the content.
+public class Ship : Entity
+{
+    public mut int in 0..100000 Hp = 50;
+    public mut int Words;
+
+    public void Update(float dt)
+    {
+    }
+
+    public client void Render()
+    {
+        Draw.Sprite(Hp, 0, 0);
+    }
+
+    public client void Input()
+    {
+        if (Time.Tick % 5 == 0)
+        {
+            Say($"héllo {Time.Tick} 안녕", Time.Tick % 3, "!");
+        }
+    }
+
+    public void Say(string text, int times, string tail)
+    {
+        Words += times;
+        Hp = Math.Min(Hp + text.Length * times + tail.Length + (text.EndsWith("녕") ? 1 : 0), 100000);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Ship());
+        Spawn(new Ship());
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 25 == 0)
+        {
+            foreach (var s in Query<Ship>())
+            {
+                Print($"{Time.Tick} {s.Hp} {s.Words}");
+            }
+        }
+    }
+}

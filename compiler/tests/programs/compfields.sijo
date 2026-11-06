@@ -1,0 +1,91 @@
+// Components beyond plain values: entities spawned with components, component fields that hold
+// strings, lists and arrays (an Add copies them like message arguments; they go with the
+// component when it is removed), and component coroutines (the frame lives with the component:
+// Remove ends it, a new Add starts it again) (tests/components.rs, expected output in
+// compfields.expected).
+public component Tagged
+{
+    public string Label = "none";
+    public mut List<int> Hits;
+    public mut int[] Slots = new int[3];
+
+    public void Update(float dt)
+    {
+        Hits.Add(Time.Tick);
+        Slots[Time.Tick % 3] += 1;
+        if (Hits.Count >= 3)
+        {
+            Remove<Tagged>();
+        }
+    }
+}
+
+public component Fuse
+{
+    public mut int Waited;
+    public int Delay = 2;
+
+    public async void Run()
+    {
+        int start = Time.Tick;
+        await Wait(Delay / 60.0f);
+        Waited = Time.Tick - start;
+        await NextTick();
+        if (Owner is Bomb b)
+        {
+            b.Boom($"boom@{Time.Tick}");
+        }
+        Remove<Fuse>();
+    }
+}
+
+public class Bomb : Entity
+{
+    public mut int Booms;
+    public mut List<string> Log;
+    public string Name = "b";
+
+    public void Boom(string what)
+    {
+        Booms += 1;
+        Log.Add(what);
+    }
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 6 && !Has<Fuse>() && Name == "y")
+        {
+            Add(new Fuse { Delay = 1 });
+        }
+        if (Time.Tick == 2 && Name == "z")
+        {
+            mut var seed = new List<int> { 7, 8 };
+            Add(new Tagged { Label = $"late-{Name}", Hits = seed });
+            seed.Add(9);
+        }
+        if (Time.Tick == 5 && Name == "x")
+        {
+            Add(new Tagged { Label = "again" });
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Bomb { Name = "x" }, new Fuse { Delay = 3 }, new Tagged { Label = "first" });
+        Spawn(new Bomb { Name = "y" }, new Fuse { });
+        Spawn(new Bomb { Name = "z" });
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var b in Query<Bomb>())
+        {
+            string fuse = b.Get<Fuse>() is Fuse f ? $"{f.Waited}" : "-";
+            string tag = b.Get<Tagged>() is Tagged t ? $"{t.Label}:{t.Hits.Count}:{t.Slots[0]}{t.Slots[1]}{t.Slots[2]}" : "-";
+            Print($"t{Time.Tick} {b.Name} booms {b.Booms} fuse {fuse} tag {tag} log {string.Join(",", b.Log)}");
+        }
+    }
+}

@@ -1,0 +1,99 @@
+// Large replicated lists that change a little every tick: a few cells written in place, a sliding
+// window (remove the first element, add one at the end), a log that grows and is cut back, a long
+// string that is edited, a big list of entity references, and now and then a sort (a change of
+// almost every element). The server sends each change as a delta against the value the client
+// acknowledged (changed byte ranges, the appended tail, the new length) when that is smaller than
+// the whole list, so far fewer bytes travel than when the lists are resent whole
+// (--no-list-deltas); the run must end with the client equal to the server (tests/net_e2e.rs).
+public class Board : Entity
+{
+    public int Id;
+    public mut List<int> Cells;
+    public mut List<float> Trail;
+    public mut List<int> Log;
+    public mut string Text = "";
+    public mut List<Board?> Peers;
+
+    public void Update(float dt)
+    {
+        if (Cells.Count == 0)
+        {
+            for (int i = 0; i < 512; i++)
+            {
+                Cells.Add(i * (Id + 3) % 97);
+            }
+        }
+        Cells[(Time.Tick * 37 + Id) % 512] = Time.Tick;
+        Cells[(Time.Tick * 101) % 512] += 1;
+        if (Time.Tick % 97 == Id)
+        {
+            Cells.Sort();
+        }
+        Trail.Add(Time.Tick * 0.5f + Id);
+        if (Trail.Count > 200)
+        {
+            Trail.RemoveAt(0);
+        }
+        Log.Add(Time.Tick * 3 + Id);
+        if (Log.Count > 300)
+        {
+            while (Log.Count > 100)
+            {
+                Log.RemoveAt(Log.Count - 1);
+            }
+        }
+        if (Time.Tick % 3 == 0)
+        {
+            Text = Text.Length > 400 ? Text.Substring(0, 200) : Text + $"t{Time.Tick};";
+        }
+        if (Time.Tick % 5 == Id % 5)
+        {
+            Peers.Clear();
+            foreach (var b in Query<Board>())
+            {
+                for (int k = 0; k < 40; k++)
+                {
+                    Peers.Add(b);
+                }
+            }
+        }
+        if (Peers.Count > 0)
+        {
+            Peers[Time.Tick % Peers.Count] = null;
+        }
+    }
+
+    public client void Render()
+    {
+        mut int sum = 0;
+        foreach (var c in Cells)
+        {
+            sum += c;
+        }
+        mut float trail = 0;
+        foreach (var t in Trail)
+        {
+            trail += t;
+        }
+        mut int peers = 0;
+        foreach (var p in Peers)
+        {
+            if (p is Board b)
+            {
+                peers += b.Id + 1;
+            }
+        }
+        Draw.Text(Id * 10, 0, $"{sum} {trail} {Log.Count} {Text.Length} {peers}");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            Spawn(new Board { Id = i });
+        }
+    }
+}

@@ -1,0 +1,100 @@
+// Interest management: the client looks at a circle around the camera (Net.View) and the server
+// sends it only the movers inside it (plus entities without a position, like the score). Movers
+// drift in and out of view, references to movers out of view read as null on the client and come
+// back when the target is seen again. The run must end with the client equal to the server's state
+// restricted to the client's view (tests/net_e2e.rs).
+public struct SVec2
+{
+    public float X;
+    public float Y;
+}
+
+public class Mover : Entity
+{
+    public int Id;
+    public mut SVec2 Pos;
+    public float Speed;
+    public mut Mover? Leader;
+
+    public void Update(float dt)
+    {
+        Pos.X += Speed;
+        if (Pos.X > 100)
+        {
+            Pos.X -= 200;
+        }
+    }
+
+    public void Follow(Mover? leader)
+    {
+        Leader = leader;
+    }
+
+    public client void Render()
+    {
+        int lead = Leader is Mover m ? m.Id : -1;
+        Draw.Text(Pos.X, Pos.Y, $"{Id}>{lead}");
+    }
+}
+
+// the camera has no position field (Pos/Position/[Spatial]), so it is always sent: the client's
+// view follows it even when it jumps
+public class Camera : Entity
+{
+    public mut SVec2 Focus;
+
+    public void Update(float dt)
+    {
+        Focus.X = (Time.Tick % 240) - 120;
+    }
+
+    public client void Look()
+    {
+        Net.View(Focus.X, Focus.Y, 30);
+    }
+}
+
+public class Score : Entity
+{
+    public mut int Ticks;
+
+    public void Update(float dt)
+    {
+        Ticks++;
+    }
+
+    public client void Show()
+    {
+        Draw.Text(0, 0, $"{Ticks}");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Camera());
+        Spawn(new Score());
+        for (int i = 0; i < 80; i++)
+        {
+            Spawn(new Mover { Id = i, Pos = new SVec2 { X = i * 2.5f - 100, Y = (i % 9) * 4 - 16 }, Speed = 0.1f + (i % 7) * 0.05f });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        // each mover follows another one, often far away (out of the client's view)
+        if (Time.Tick == 1)
+        {
+            mut var all = new List<Mover>();
+            foreach (var m in Query<Mover>())
+            {
+                all.Add(m);
+            }
+            foreach (var m in Query<Mover>())
+            {
+                m.Follow(all[(m.Id * 37 + 11) % all.Count]);
+            }
+        }
+    }
+}

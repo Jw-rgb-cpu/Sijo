@@ -1,0 +1,40 @@
+lists undone [5,3,8]
+lists kept [109,3,1]
+lists kept by calls [1,1003,4,109]
+list replaced [42]
+array undone [4,2,6]
+array kept [2,4,60]
+dictionary undone {a=1;b=2;c=3;} 3 False 3
+dictionary kept {c=3;b=7;d=4;} 3 False
+nested undone {[1,2][3]}
+nested kept {[1,2,9][4,5]}
+struct elements undone (1,1)(2,2)
+struct elements kept (6,-4)(2,2)
+strings undone [ann,bob]
+strings kept [z2,ann?,bob]
+inner fail [1,2,4] 1
+outer fail [1,2,4] 1
+copy handed outward [1,2,4]
+marks inside copies [1,2,4]
+marks inside copies kept [1,2,4,7]
+return 301 3 2 2
+break and continue keep [1,3,4] 8
+loop in atomic [1,3,4] ''
+atomic in loop [34,3,1]
+break out of a switch [34,3,1,34] last 9
+shop 1: True gold 4 stock [3,5,10] slots [0,1,0] shelves 2/4 log 2 prices {p3=3;p5=5;p8=9;}
+world 1: bags 1 804 pings 8
+traders 1: coins 1195 goods 400 120000 seen 400 tokens 400 120400 sink 400
+shop 2: False gold 4 stock [3,5,10] slots [0,1,0] shelves 2/4 log 2 prices {p3=3;p5=5;p8=9;}
+world 2: bags 1 804 pings 8
+traders 2: coins 2394 goods 800 300700 seen 800 tokens 800 241000 sink 800
+shop 3: True gold 7 stock [5,10,30] slots [3,1,0] shelves 3/7 log 4 prices {p3=4;p5=5;p8=9;}
+world 3: bags 2 1111 pings 11
+traders 3: coins 3590 goods 1200 543100 seen 1200 tokens 1200 361800 sink 1200
+shop 4: False gold 7 stock [5,10,30] slots [3,1,0] shelves 3/7 log 4 prices {p3=4;p5=5;p8=9;}
+walker [3,0,1] [2,6] 2
+world 4: bags 2 1111 pings 11
+traders 4: coins 4785 goods 1600 906700 seen 1600 tokens 1600 482200 sink 1600
+shop 5: False gold 17 stock [5,10,30,50] slots [3,1,5] shelves 4/10 log 5 prices {p3=4;p5=5;p8=9;}
+world 5: bags 2 1111 pings 11
+traders 5: coins 5984 goods 2000 1332800 seen 1800 tokens 2000 602800 sink 2000

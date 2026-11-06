@@ -1,0 +1,116 @@
+// Dictionaries: int/enum/string/handle keys, struct values with strings, Add/TryGetValue/Remove/
+// GetValueOrDefault, compound assignment, iteration over pairs/Keys/Values, entity-owned state.
+public enum EItem
+{
+    Sword,
+    Potion,
+    Gold
+}
+
+public struct SStat
+{
+    public int Uses;
+    public string Note;
+}
+
+public class Hero : Entity
+{
+    public mut Dictionary<EItem, int> Bag;
+    public mut Dictionary<string, SStat> Stats;
+    public mut Dictionary<Hero?, int> Damage;
+    public mut int Turn;
+    public mut string Log;
+
+    public void Update(float dt)
+    {
+        Turn += 1;
+        Log += "x";
+        if (Turn == 1)
+        {
+            Bag[EItem.Gold] = 10;
+            Bag.Add(EItem.Potion, 3);
+        }
+        Bag[EItem.Gold] += Turn;
+        string key = $"t{Turn % 5}";
+        mut SStat s;
+        if (Stats.TryGetValue(key, out s))
+        {
+            s.Uses += 1;
+            s.Note = s.Note + "+";
+            Stats[key] = s;
+        }
+        else
+        {
+            Stats[key] = new SStat { Uses = 1, Note = key };
+        }
+        if (Turn % 7 == 0)
+        {
+            Stats.Remove("t2");
+            Bag.Remove(EItem.Potion);
+        }
+        foreach (var other in Query<Hero>())
+        {
+            if (other != this)
+            {
+                Damage[other] = Damage.GetValueOrDefault(other) + 1;
+            }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Hero());
+        Spawn(new Hero());
+        mut var squares = new Dictionary<int, int>();
+        for (int i = 0; i < 1000; i++)
+        {
+            squares[i] = i * i;
+        }
+        for (int i = 0; i < 1000; i += 2)
+        {
+            squares.Remove(i);
+        }
+        mut int sum = 0;
+        foreach (var kv in squares)
+        {
+            sum += kv.Value - kv.Key;
+        }
+        mut int keys = 0;
+        foreach (var k in squares.Keys)
+        {
+            keys += k;
+        }
+        Print($"count={squares.Count} sum={sum} keys={keys} has7={squares.ContainsKey(7)} has8={squares.ContainsKey(8)} v9={squares[9]} def={squares.GetValueOrDefault(8, -1)}");
+        mut var names = new Dictionary<string, int>();
+        names["하나"] = 1;
+        names["둘"] = 2;
+        names["하나"] += 10;
+        foreach (var kv in names)
+        {
+            Print($"{kv.Key}={kv.Value}");
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 20)
+        {
+            foreach (var h in Query<Hero>())
+            {
+                mut string line = $"gold={h.Bag[EItem.Gold]} potion={h.Bag.ContainsKey(EItem.Potion)} stats={h.Stats.Count} dmg={h.Damage.Count}:";
+                foreach (var kv in h.Stats)
+                {
+                    line += $" {kv.Key}:{kv.Value.Uses}{kv.Value.Note}";
+                }
+                foreach (var d in h.Damage.Values)
+                {
+                    line += $" d{d}";
+                }
+                Print(line);
+            }
+        }
+    }
+}

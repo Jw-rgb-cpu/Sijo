@@ -1,0 +1,237 @@
+// Dynamic components (docs/04 §4.4.1): status effects that entities gain and lose at run time.
+// Add/Remove apply at the end of the system in command order, Has/Get/queries see the composition
+// the system started with, a component's Update runs on every entity that has it, writes and
+// messages to another entity's component are deferred, subclasses and other classes take
+// components too, a coroutine keeps running while its entity changes tables, and client code reads
+// components (tests/components.rs: expected output in components.expected, 1 and 4 threads,
+// sanitizers, save/restore in the middle, replication check).
+public component Burning
+{
+    public mut int Left = 3;
+    public mut int in 0..9 Power = 1;
+
+    public void Update(float dt)
+    {
+        Left -= 1;
+        // the owner is reached through a handle: a deferred += (the system rule)
+        if (Owner is Ship s)
+        {
+            s.Hp -= Power;
+        }
+        if (Left <= 0)
+        {
+            Remove<Burning>();
+        }
+    }
+
+    // a message to the component of another entity: delivered at the end of the system
+    public void Fuel(int ticks)
+    {
+        Left += ticks;
+    }
+}
+
+public component Stunned
+{
+    public mut int Ticks = 2;
+
+    public void Update(float dt)
+    {
+        Ticks -= 1;
+        if (Ticks <= 0)
+        {
+            Remove<Stunned>();
+        }
+    }
+}
+
+// no Update: a component can be plain data
+public component Shielded
+{
+    public int Charges = 1;
+}
+
+// a component that destroys the entity it belongs to
+public component Doomed
+{
+    public mut int Ticks = 1;
+
+    public void Update(float dt)
+    {
+        Ticks -= 1;
+        if (Ticks <= 0)
+        {
+            Print($"{Time.Tick}: doom");
+            Destroy(Owner);
+        }
+    }
+}
+
+public class Ship : Entity
+{
+    public int Id;
+    public mut int Hp = 100;
+    public Ship? Peer;
+
+    public void Update(float dt)
+    {
+        int t = Time.Tick;
+        if (Has<Stunned>())
+        {
+            Print($"{t}: ship {Id} is stunned");
+            return;
+        }
+        if (Id == 1 && t == 1)
+        {
+            Add(new Burning { Left = 3, Power = 2 });
+            Print($"{t}: ship 1 added Burning; has it in this system: {Has<Burning>()}");
+        }
+        if (Id == 2 && t == 2)
+        {
+            // two adds in one system: the later one wins; removing what is not there does nothing
+            Add(new Burning { Left = 1 });
+            Add(new Burning { Left = 4, Power = 3 });
+            Remove<Shielded>();
+        }
+        if (Id == 1 && t == 3 && Peer is Ship p && p.Get<Burning>() is Burning b)
+        {
+            // another entity's component: the write and the message apply at the end of the
+            // system, in this order; reads see the start of the system
+            b.Left += 10;
+            b.Fuel(5);
+            Print($"{t}: ship 1 sees ship {p.Id} burning {b.Left}");
+        }
+        if (Id == 3 && t == 4 && Peer is Ship q)
+        {
+            q.Add(new Stunned { Ticks = 2 });
+            Add(new Shielded { Charges = 2 });
+        }
+        if (Id == 3 && t == 6)
+        {
+            // adding a component the entity has replaces its values
+            Add(new Shielded { Charges = 5 });
+        }
+        if (Id == 4 && t == 7)
+        {
+            Add(new Shielded { Charges = 7 });
+        }
+        if (t == 10 && Id == 2)
+        {
+            // in command order: removed, then added again
+            Remove<Burning>();
+            Add(new Burning { Left = 2, Power = 5 });
+        }
+        if (t == 10 && Id == 3)
+        {
+            // added, then removed: gone
+            Add(new Burning { Left = 9 });
+            Remove<Burning>();
+        }
+        if (t == 11 && Id == 2 && Get<Burning>() is Burning mine)
+        {
+            mine.Power += 1;
+        }
+    }
+
+    public client void Render()
+    {
+        if (Get<Burning>() is Burning b)
+        {
+            Draw.Text(Id, 0, $"burning {b.Left}");
+        }
+        else if (Has<Stunned>())
+        {
+            Draw.Text(Id, 0, "stunned");
+        }
+        else
+        {
+            Draw.Sprite(1, Id, 0);
+        }
+    }
+}
+
+// a subclass takes components like its base class
+public class Fighter : Ship
+{
+}
+
+// another class takes the same component; its coroutine keeps running while it changes tables
+public class Rock : Entity
+{
+    public int Id;
+    public mut int Heat;
+    public mut int Pulses;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 5 && Id == 1)
+        {
+            Add(new Burning { Left = 2 });
+        }
+        if (Time.Tick == 7 && Id == 2)
+        {
+            Add(new Doomed { Ticks = 2 });
+        }
+        if (Get<Burning>() is Burning b)
+        {
+            Heat += b.Power;
+        }
+    }
+
+    public async void Pulse()
+    {
+        while (true)
+        {
+            await NextTick();
+            Pulses += 1;
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        var two = Spawn(new Ship { Id = 2 });
+        var one = Spawn(new Ship { Id = 1, Peer = two });
+        Spawn(new Ship { Id = 3, Peer = one });
+        Spawn(new Fighter { Id = 4 });
+        Spawn(new Rock { Id = 1 });
+        Spawn(new Rock { Id = 2 });
+    }
+
+    public static void Update(float dt)
+    {
+        int t = Time.Tick;
+        // one cursor per type: the same entity seen as a Ship and as its Burning
+        foreach (var (s, b) in Query<Ship, Burning>())
+        {
+            Print($"{t}: ship {s.Id} burning left={b.Left} power={b.Power} hp={s.Hp}");
+        }
+        foreach (var s in Query<Ship, Shielded>())
+        {
+            if (s.Get<Shielded>() is Shielded sh)
+            {
+                Print($"{t}: ship {s.Id} shielded {sh.Charges}");
+            }
+        }
+        // every entity with Burning, whatever its class
+        mut int left = 0;
+        foreach (var b in Query<Burning>())
+        {
+            left += b.Left;
+        }
+        Print($"{t}: burning={Count<Burning>()} (left {left}) stunned={Count<Stunned>()} ships={Count<Ship>()} fighters={Count<Fighter>()} rocks={Count<Rock>()}");
+        if (t == 12)
+        {
+            foreach (var r in Query<Rock>())
+            {
+                Print($"rock {r.Id} heat={r.Heat} pulses={r.Pulses}");
+            }
+            foreach (var s in Query<Ship>())
+            {
+                Print($"ship {s.Id} hp={s.Hp}");
+            }
+        }
+    }
+}

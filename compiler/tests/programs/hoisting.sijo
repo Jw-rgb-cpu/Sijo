@@ -1,0 +1,158 @@
+// Loop-invariant handle work hoisted out of query loops (cursor == handle compares rows, `is` is
+// tested once), partial hazard snapshots (only the remotely read fields are copied) and pending
+// spawn tables that are swapped into an empty main table. The expected output was produced by the
+// compiler before these optimizations.
+public abstract class Unit : Entity
+{
+    public int Id;
+    public mut int Hp = 50;
+    public mut Unit? Target;
+    public mut Unit? Focus;
+    public mut int Seen;
+    public mut int Same;
+    public mut int Moved;
+    public mut List<int> Marks;
+    public int Bonus;
+
+    public void Update(float dt)
+    {
+        // invariant: Target is not written in the loop
+        mut int notTarget = 0;
+        mut int sameAsFocus = 0;
+        foreach (var u in Query<Unit>())
+        {
+            if (u != Target)
+            {
+                notTarget += 1;
+            }
+            if (Focus == u)
+            {
+                sameAsFocus += 1;
+            }
+            // not invariant: Focus changes inside the loop
+            if (u.Id % 7 == Id % 7)
+            {
+                Focus = u;
+            }
+            if (Target is Unit t && t.Hp > u.Hp)
+            {
+                Same += 1;
+            }
+        }
+        Seen = notTarget * 1000 + sameAsFocus;
+        // local handle, assigned before the loop only
+        Unit? pick = Target;
+        mut int hits = 0;
+        foreach (var u in Query<Unit>())
+        {
+            if (pick == u)
+            {
+                hits += 1;
+            }
+        }
+        // local handle reassigned inside the loop: must compare with the current value
+        mut Unit? last = null;
+        mut int chain = 0;
+        foreach (var u in Query<Unit>())
+        {
+            if (last != u && u.Hp >= Hp)
+            {
+                chain += 1;
+                last = u;
+            }
+        }
+        // hazard: Hp is written here and read on others; Marks is read on others too
+        mut int bigger = 0;
+        foreach (var u in Query<Unit>())
+        {
+            if (u.Hp > Hp && u.Marks.Count > 0)
+            {
+                bigger += 1;
+            }
+        }
+        Hp = (Hp * 7 + bigger + hits + chain) % 97;
+        Moved += hits;
+        if (Marks.Count < 4)
+        {
+            Marks.Add(Hp);
+        }
+        else
+        {
+            Marks.RemoveAt(0);
+        }
+        Retarget();
+    }
+
+    void Retarget()
+    {
+        mut Unit? best = null;
+        foreach (var u in Query<Unit>())
+        {
+            if (u == this)
+            {
+                continue;
+            }
+            // `best` changes inside the loop: the `is` must be tested every time
+            if (best is Unit b)
+            {
+                if (u.Hp > b.Hp || (u.Hp == b.Hp && u.Id < b.Id))
+                {
+                    best = u;
+                }
+            }
+            else
+            {
+                best = u;
+            }
+        }
+        Target = best;
+    }
+}
+
+public class Knight : Unit
+{
+}
+
+public class Archer : Unit
+{
+    public float Range = 3;
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            if (i % 3 == 0)
+            {
+                Spawn(new Archer { Id = i, Hp = (i * 37) % 90 + 5 });
+            }
+            else
+            {
+                Spawn(new Knight { Id = i, Hp = (i * 53) % 90 + 5 });
+            }
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 5 == 0)
+        {
+            mut int h = 0;
+            foreach (var u in Query<Unit>())
+            {
+                h = h * 31 + u.Id * 1000003 + u.Hp * 101 + u.Seen * 7 + u.Same * 13 + u.Moved;
+            }
+            Print($"tick {Time.Tick}: units={Count<Unit>()} h={h}");
+        }
+        if (Time.Tick == 7)
+        {
+            // a large spawn into tables that already have rows (no swap) ...
+            for (int i = 40; i < 300; i++)
+            {
+                Spawn(new Knight { Id = i, Hp = (i * 11) % 90 + 5 });
+            }
+        }
+    }
+}

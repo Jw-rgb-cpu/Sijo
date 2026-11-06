@@ -1,0 +1,154 @@
+// Nested collections: List<List<T>>, T[][], List<T>[], List<T[]> as locals, return values and
+// entity fields; element lists live in their outer list's region and are freed with it (Clear,
+// RemoveAt, reassignment, Destroy, end of function); Clone and hazard snapshots copy deeply.
+// Unlike C#, the elements of new List<int>[n] / new int[n][] start as empty collections, not null.
+public static class Grids
+{
+    public static own List<List<int>> Table(int rows, int cols)
+    {
+        mut var t = new List<List<int>>();
+        for (int r = 0; r < rows; r++)
+        {
+            mut var row = new List<int>();
+            for (int c = 0; c < cols; c++)
+            {
+                row.Add(r * 10 + c);
+            }
+            t.Add(row);
+        }
+        return t;
+    }
+
+    public static int Sum(List<List<int>> t)
+    {
+        mut int s = 0;
+        foreach (var row in t)
+        {
+            foreach (int x in row)
+            {
+                s += x;
+            }
+        }
+        return s;
+    }
+
+    public static string Show(List<List<int>> t)
+    {
+        mut string o = "";
+        foreach (var row in t)
+        {
+            o += "[" + string.Join(",", row) + "]";
+        }
+        return o;
+    }
+
+    public static own List<string[]> Words()
+    {
+        mut var w = new List<string[]>();
+        w.Add(new string[] { "a", "b" });
+        w.Add(new string[] { "cc" });
+        return w;
+    }
+}
+
+public class Map : Entity
+{
+    public mut List<List<int>> Rows;
+    public mut int[][] Jag = new int[3][];
+    public int Id;
+    public mut int Seen;
+
+    public void Update(float dt)
+    {
+        int t = Time.Tick;
+        if (Rows.Count < 3)
+        {
+            mut var row = new List<int>();
+            row.Add(Id);
+            Rows.Add(row);
+        }
+        Rows[t % Rows.Count].Add(t);
+        if (Rows[0].Count > 4)
+        {
+            Rows.RemoveAt(0);
+        }
+        Jag[t % 3] = new int[t % 4 + 1];
+        Jag[t % 3][0] = t;
+        mut int seen = 0;
+        foreach (var m in Query<Map>())
+        {
+            if (m != this)
+            {
+                seen += Grids.Sum(m.Rows);
+            }
+        }
+        Seen = seen;
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        mut var t = Grids.Table(3, 4);
+        Print($"{t.Count} {t[1].Count} {t[2][3]} {Grids.Sum(t)} {Grids.Show(t)}");
+        t[0].Add(99);
+        t[1][0] = -1;
+        t.RemoveAt(2);
+        Print(Grids.Show(t));
+        mut var copy = t.Clone();
+        copy[0][0] = 1000;
+        copy[1].Clear();
+        Print($"{Grids.Show(t)} | {Grids.Show(copy)}");
+        t.Insert(0, new List<int>());
+        t[0].Add(7);
+        Print(Grids.Show(t));
+        mut int[][] jag = new int[3][];
+        for (int i = 0; i < jag.Length; i++)
+        {
+            jag[i] = new int[i + 1];
+            for (int k = 0; k <= i; k++)
+            {
+                jag[i][k] = i + k;
+            }
+        }
+        mut int js = 0;
+        foreach (int[] r in jag)
+        {
+            js += r.Length * 100 + r[r.Length - 1];
+        }
+        Print($"jag {js} {jag[2][1]} {jag[0].Length}");
+        mut List<int>[] buckets = new List<int>[3];
+        for (int v = 0; v < 10; v++)
+        {
+            buckets[v % 3].Add(v);
+        }
+        Print($"buckets {string.Join(",", buckets[0])} | {string.Join(",", buckets[1])} | {buckets[2].Count}");
+        var words = Grids.Words();
+        Print($"words {words.Count} {words[0][1]} {words[1][0]} {words[0].Length}");
+        var lit = new int[][] { new int[] { 1, 2 }, new int[] { 3 } };
+        Print($"lit {lit[0][1] + lit[1][0]}");
+        t.Clear();
+        Print($"cleared {t.Count}");
+        for (int i = 0; i < 2; i++)
+        {
+            Spawn(new Map { Id = i + 1 });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 6 == 0)
+        {
+            foreach (var m in Query<Map>())
+            {
+                mut string jag = "";
+                foreach (var r in m.Jag)
+                {
+                    jag += $"{r.Length}:{(r.Length > 0 ? r[0] : -1)} ";
+                }
+                Print($"tick {Time.Tick} map {m.Id}: {Grids.Show(m.Rows)} seen={m.Seen} jag={jag}");
+            }
+        }
+    }
+}

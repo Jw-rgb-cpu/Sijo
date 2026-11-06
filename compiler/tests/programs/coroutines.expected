@@ -1,0 +1,13 @@
+tick 1: wave 1 spawned, guards=0
+tick 32: wave 2 spawned, guards=1
+tick 40: guard x=24 y=1 laps=3 hp=10 mood=hurt
+tick 40: guard x=4 y=2 laps=0 hp=100 mood=resting after lap 0
+tick 40: guard x=14 y=2 laps=0 hp=100 mood=resting after lap 0
+tick 63: wave 3 spawned, guards=3
+tick 94: director done
+tick 120: guard x=24 y=1 laps=3 hp=-790 mood=hurt
+tick 120: guard x=24 y=2 laps=3 hp=-480 mood=hurt
+tick 120: guard x=34 y=2 laps=3 hp=-480 mood=hurt
+tick 120: guard x=24 y=3 laps=3 hp=-170 mood=hurt
+tick 120: guard x=34 y=3 laps=3 hp=-170 mood=hurt
+tick 120: guard x=44 y=3 laps=3 hp=-170 mood=hurt

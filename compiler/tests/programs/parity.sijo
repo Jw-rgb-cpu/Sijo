@@ -1,0 +1,135 @@
+// C# parity checks with an exact expected output (parity.expected). Lines a-e are what .NET 8 prints
+// for the same C# code: list-element assignments evaluate the index, then the value, then store
+// (also when the value grows the list); undefined enum values print their number. The rest are
+// Sijo rules: a range type (int in 0..100) applies to field defaults, Wait(seconds) waits a
+// whole number of ticks.
+// Line f: duplicate enum values and `out int x` / `out var x` / `out _` declarations; h-j: List methods.
+public enum EKind { Red, Green }
+public enum EDup { A = 2, B = 1, C = 2, D = 1, E = 2 }
+
+public static class P
+{
+    public static int Idx(ref int calls, int v)
+    {
+        calls += 1;
+        return v;
+    }
+
+    public static bool Has(Dictionary<string, int> d, string k) => d.TryGetValue(k, out int v) && v > 4;
+
+    public static string Join(List<int> xs)
+    {
+        mut string s = "";
+        for (int i = 0; i < xs.Count; i++)
+        {
+            s += (i > 0 ? "," : "") + xs[i];
+        }
+        return s;
+    }
+
+    public static int Seven(int x)
+    {
+        return x + 7;
+    }
+
+    public static int Grow(ref List<int> xs)
+    {
+        for (int k = 0; k < 100; k++)
+        {
+            xs.Add(k);
+        }
+        return 99;
+    }
+}
+
+public class Unit : Entity
+{
+    public int in 0..100 Hp = 150;
+    public float in -1..1 Speed = -3;
+
+    public async void Run()
+    {
+        mut int start = Time.Tick;
+        await Wait(1);
+        Print($"Wait(1): {Time.Tick - start} ticks");
+        start = Time.Tick;
+        await Wait(0.1);
+        Print($"Wait(0.1): {Time.Tick - start} ticks");
+        start = Time.Tick;
+        await Wait(0.02);
+        Print($"Wait(0.02): {Time.Tick - start} ticks");
+        start = Time.Tick;
+        await Wait(0);
+        Print($"Wait(0): {Time.Tick - start} ticks");
+    }
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            Print($"range defaults: Hp={Hp} Speed={Speed}");
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        int z = Time.Tick;
+        mut var xs = new List<int>();
+        xs.Add(10);
+        xs.Add(20);
+        mut int i = 0;
+        xs[i++] = i;
+        Print($"a: xs=[{xs[0]},{xs[1]}] i={i}");
+        xs[0] = 10;
+        xs[1] = 20;
+        i = 0;
+        xs[i] = i++;
+        Print($"b: xs=[{xs[0]},{xs[1]}] i={i}");
+        mut int calls = 0;
+        xs[0] = 10;
+        xs[1] = 20;
+        xs[P.Idx(ref calls, 1)] += P.Seven(z);
+        Print($"c: calls={calls} xs=[{xs[0]},{xs[1]}]");
+        xs[0] = 10;
+        xs[1] = 20;
+        i = 0;
+        xs[i++] += P.Seven(z);
+        Print($"d: xs=[{xs[0]},{xs[1]}] i={i}");
+        xs[0] = P.Grow(ref xs);
+        Print($"e: xs[0]={xs[0]} count={xs.Count} enum={(EKind)7} {(EKind)1}");
+        // several names for one value print the first declared one (.NET 8: "A B A B")
+        mut var d = new Dictionary<string, int>();
+        d["k"] = 5;
+        bool found = d.TryGetValue("k", out int v) && v > 0;
+        int.TryParse(" -12 ", out var n);
+        d.TryGetValue("none", out _);
+        Print($"f: {EDup.C} {EDup.D} {EDup.E} {(EDup)(1 + z)} out: {found} {v} {n}");
+        Print($"g: {P.Has(d, "k")} {P.Has(d, "x")}");
+        // List methods (.NET 8 output; strings sorted with StringComparer.Ordinal)
+        mut var items = new List<int>();
+        items.Add(5); items.Add(1); items.Add(4); items.Add(1);
+        items.Insert(0, 9);
+        items.Insert(items.Count, 7);
+        bool r1 = items.Remove(1);
+        bool r2 = items.Remove(42);
+        Print($"h: {P.Join(items)} {items.IndexOf(4)} {items.IndexOf(42)} {r1} {r2}");
+        items.Sort();
+        string sorted = P.Join(items);
+        items.Reverse();
+        Print($"i: {sorted} {P.Join(items)}");
+        mut var fs = new List<float>();
+        fs.Add(3.5f); fs.Add(float.NaN); fs.Add(-0.0f * (z + 1)); fs.Add(-2); fs.Add(0.0f); fs.Add(float.NegativeInfinity); fs.Add(float.NaN);
+        int nanAt = fs.IndexOf(float.NaN);
+        fs.Sort();
+        mut string fo = "";
+        for (int k = 0; k < fs.Count; k++) { fo += fs[k] + " "; }
+        mut var ss = new List<string>();
+        ss.Add("pear"); ss.Add("Apple"); ss.Add("apple"); ss.Add("Banana"); ss.Add("");
+        ss.Sort();
+        Print($"j: {nanAt} {fs.Contains(float.NaN)} {fo}{string.Join("|", ss)}");
+        Spawn(new Unit { });
+    }
+}

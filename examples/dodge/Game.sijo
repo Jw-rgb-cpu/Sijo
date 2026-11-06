@@ -1,0 +1,11 @@
+// Dodge: a terminal game. Build and play (needs ncurses):
+//   sijoc build examples/dodge --host examples/dodge/host_term.c --ldflags -lncurses --exe dodge
+//   ./dodge          (arrow keys / A D to move, R to restart, Q to quit)
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Ship());
+        Spawn(new Director());
+    }
+}

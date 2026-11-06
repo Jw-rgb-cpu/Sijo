@@ -1,0 +1,101 @@
+// Proximity loops written with a square root (Length, Distance, Math.Sqrt) are grid-accelerated like
+// squared distances. The grid visits a superset of the neighbours in full-scan order and the loop
+// still evaluates its own test, so results are bit-identical to the full scan (-DSIJO_NO_SPATIAL).
+public struct P2
+{
+    public float X;
+    public float Y;
+
+    public P2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static P2 operator -(P2 a, P2 b) => new P2(a.X - b.X, a.Y - b.Y);
+
+    public float Length => Math.Sqrt(X * X + Y * Y);
+
+    public static float Distance(P2 a, P2 b) => (a - b).Length;
+}
+
+public class Mote : Entity
+{
+    public mut P2 Pos;
+    public mut P2 Vel;
+    public float Reach = 2.5;
+    public mut int Near;
+    public mut int Far;
+    public mut float Pull;
+
+    public void Update(float dt)
+    {
+        Near = 0;
+        foreach (var o in Query<Mote>())
+        {
+            if ((o.Pos - Pos).Length < 1.5)
+            {
+                Near += 1;
+            }
+        }
+        mut float pull = 0;
+        foreach (var o in Query<Mote>())
+        {
+            if (o == this)
+            {
+                continue;
+            }
+            float d = P2.Distance(o.Pos, Pos);
+            if (d >= Reach)
+            {
+                continue;
+            }
+            pull += (Reach - d) * 0.01;
+        }
+        Pull = pull;
+        Pos = new P2(Pos.X + Vel.X * dt + Pull * 0.001, Pos.Y + Vel.Y * dt);
+        if (Pos.X < 0 || Pos.X > 40)
+        {
+            Vel = new P2(-Vel.X, Vel.Y);
+        }
+        if (Pos.Y < 0 || Pos.Y > 40)
+        {
+            Vel = new P2(Vel.X, -Vel.Y);
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        mut int s = 12345;
+        for (int i = 0; i < 600; i++)
+        {
+            s = s * 1103515245 + 12345;
+            float x = (float)((s >> 8) & 1023) / 25.6;
+            s = s * 1103515245 + 12345;
+            float y = (float)((s >> 8) & 1023) / 25.6;
+            s = s * 1103515245 + 12345;
+            float vx = (float)(((s >> 8) & 255) - 128) / 32.0;
+            s = s * 1103515245 + 12345;
+            float vy = (float)(((s >> 8) & 255) - 128) / 32.0;
+            Spawn(new Mote { Pos = new P2(x, y), Vel = new P2(vx, vy) });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 10 == 0)
+        {
+            mut int near = 0;
+            mut float pull = 0;
+            foreach (var m in Query<Mote>())
+            {
+                near += m.Near;
+                pull += m.Pull;
+            }
+            Print($"tick {Time.Tick}: near {near} pull {pull:R}");
+        }
+    }
+}

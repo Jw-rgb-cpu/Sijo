@@ -1,0 +1,208 @@
+// Semantics test: every "pair" line prints a value computed at compile time (CTFE /
+// constant folding) next to the same computation on a runtime value. They must match.
+using Sijo;
+
+public struct V
+{
+    public int A;
+    public int B;
+    public V(int a, int b) { A = a; B = b; }
+    public mut void Swap() { int t = A; A = B; B = t; }
+    public static V operator +(V x, V y) => new V(x.A + y.A, x.B + y.B);
+    public static V operator -(V x) => new V(-x.A, -x.B);
+}
+
+public enum Color { Red, Green = 5, Blue }
+
+public static class M
+{
+    public static int Mix(int x)
+    {
+        mut int h = x;
+        for (int i = 0; i < 5; i++) { h = h * 31 + i; h ^= h >> 3; h = h << 2; }
+        return h % 1000003;
+    }
+    public static float Fl(float x) => (x * 1.5 - 0.25) / 3 + Math.Sqrt(x) + Math.Floor(x * 2.7) + x % 1.75;
+    public static int Div(int a, int b) => a / b + a % b;
+    public static int Cast(float f) => (int)f;
+    public static bool Logic(int x) => (x > 3 && x < 10) || x == -1;
+    public static int Over(int x) => x * 2147483647 + 2147483647;
+    public static int Shifts(int x) => (x << 33) + (-16 >> 2) + (x & 3) + (x | 3) + (x ^ 3) + ~x;
+    public static int Loop(int n)
+    {
+        mut int s = 0;
+        mut int i = 0;
+        while (true) { i++; if (i % 3 == 0) { continue; } if (i > n) { break; } s += i; }
+        do { s -= 1; } while (s > 1000);
+        return s;
+    }
+    public static float Trig(float x) => Math.Sin(x) + Math.Cos(x * 3) * 10 + Math.Sin(x * 1000000) * 100 + Math.Cos(x * 3e30);
+    public static float NanMinMax(float x) => Math.Min(x, x * 0 / 0) + Math.Max(x * 0 / 0, x) + Math.Min(x * 0, -(x * 0)) + Math.Max(-(x * 0), x * 0);
+    public static int Wrap(int x)
+    {
+        mut int a = x;
+        a++;
+        a += 2147483647;
+        a *= 7;
+        a = -a;
+        a--;
+        a -= -2147483647 - 1;
+        mut int b = -2147483647 - 1;
+        b = -b;
+        return a + b * 3;
+    }
+    public static float Trans(float x) => Math.Tan(x) + Math.Atan(x * 3) + Math.Atan2(x, -1.5) * 7 + Math.Asin(x / 10) + Math.Acos(-x / 9) + Math.Exp(x) + Math.Log(x * x + 1) + Math.Log10(x + 100) + Math.Log2(x + 7);
+    public static float Powy(float x) => Math.Pow(x, 2.5) + Math.Pow(-x, 3) + Math.Pow(x, -0.5) + Math.Round(x * 2) + Math.Round(2.5) + Math.Ceiling(-x) + Math.Truncate(-x * 3) + Math.Sign(-x) * 1000 + Math.Sign(-5) * 10000;
+    public static float Clampy(float x) => Math.Clamp(x, -1, 1) + Math.Min(x, 2) + Math.Max(x, -2) + Math.Abs(-x);
+    public static int Sw(int x) => x switch { < 0 => -1, 0 => 0, > 0 and <= 10 => 1, _ => 2 };
+    public static int SwEnum(Color c) => c switch { Color.Red => 1, Color.Green => 2, Color.Blue => 3 };
+    public static int SwStmt(int x)
+    {
+        mut int k = 0;
+        for (int i = 0; i < x; i++)
+        {
+            switch (i % 5)
+            {
+                case 0:
+                    continue;
+                case 1 or 2:
+                    k += 10;
+                    break;
+                case 3 when x > 7:
+                    k += 100;
+                    break;
+                default:
+                    k += 1;
+                    break;
+            }
+            k += 1000;
+        }
+        return k;
+    }
+    public static void Inc(ref int x) { x += 5; }
+    public static void Make(out int x) { x = 42; }
+}
+
+public class Animal : Entity
+{
+    public int Legs = 4;
+    public mut int Hp = 10;
+    public mut float X;
+    public virtual int Speak() => 1;
+    public void Update(float dt)
+    {
+        // every animal hits every animal (including itself) once: deferred, commutative
+        foreach (var o in Query<Animal>()) { o.Hp -= 1; }
+        // Jacobi: X = sum of all X at the start of the system (snapshot reads)
+        mut float s = 0;
+        foreach (var o in Query<Animal>()) { s += o.X; }
+        X = s;
+    }
+}
+
+public class Dog : Animal
+{
+    public override int Speak() => 10 + base.Speak();
+}
+
+public class Wallet : Entity
+{
+    public mut int Gold = 5;
+    public mut int Tries;
+    public void Update(float dt)
+    {
+        atomic
+        {
+            Gold -= 10;
+            Tries += 1;
+            Spawn(new Wallet { Gold = 999 });
+            if (Gold < 0) { fail; }
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        int z = Time.Tick; // 0, but not a compile-time constant
+        Print($"pair mix {M.Mix(12345)} {M.Mix(12345 + z)}");
+        Print($"pair fl {M.Fl(7.25)} {M.Fl(7.25 + z)}");
+        Print($"pair div {M.Div(-17, 5)} {M.Div(-17 + z, 5)}");
+        Print($"pair cast {M.Cast(-3.99)} {M.Cast(-3.99 + z)}");
+        Print($"pair castbig {M.Cast(30000000000)} {M.Cast(3e10 + z)}");
+        Print($"pair logic {M.Logic(7)} {M.Logic(7 + z)}");
+        Print($"pair logic2 {M.Logic(-1)} {M.Logic(-1 + z)}");
+        Print($"pair over {M.Over(7)} {M.Over(7 + z)}");
+        Print($"pair shifts {M.Shifts(5)} {M.Shifts(5 + z)}");
+        Print($"pair loop {M.Loop(20)} {M.Loop(20 + z)}");
+        Print($"pair clampy {M.Clampy(0.75)} {M.Clampy(0.75 + z)}");
+        Print($"pair trig {M.Trig(0.7)} {M.Trig(0.7 + z)}");
+        Print($"pair trans {M.Trans(0.7)} {M.Trans(0.7 + z)}");
+        Print($"pair trans2 {M.Trans(-2.25)} {M.Trans(-2.25 + z)}");
+        Print($"pair powy {M.Powy(1.75)} {M.Powy(1.75 + z)}");
+        Print($"pair trigbig {M.Trig(12345.678)} {M.Trig(12345.678 + z)}");
+        Print($"pair trigneg {M.Trig(-3.1415927)} {M.Trig(-3.1415927 + z)}");
+        Print($"pair nanminmax {M.NanMinMax(2.5)} {M.NanMinMax(2.5 + z)}");
+        Print($"pair wrap {M.Wrap(2147483647)} {M.Wrap(2147483647 + (int)z)}");
+        Print($"pair fmtE {M.Fl(123.456):E3} {M.Fl(123.456 + z):E3}");
+        Print($"pair fmtN {M.Fl(98765.4):N1} {M.Fl(98765.4 + z):N1}");
+        Print($"pair fmt {M.Fl(1.5):F3} {M.Fl(1.5 + z):F3}");
+        Print($"pair sw {M.Sw(7)} {M.Sw(7 + z)}");
+        Print($"pair swneg {M.Sw(-3)} {M.Sw(-3 + z)}");
+        Print($"pair swbig {M.Sw(11)} {M.Sw(11 + z)}");
+        Print($"pair swstmt {M.SwStmt(9)} {M.SwStmt(9 + z)}");
+        Print($"pair swenum {M.SwEnum(Color.Green)} {M.SwEnum((Color)(5 + z))}");
+        mut var v = -(new V(1, 2) + new V(10, 20));
+        mut var u = -(new V(1 + z, 2) + new V(10, 20));
+        v.Swap();
+        u.Swap();
+        Print($"pair struct {v.A * 100 + v.B} {u.A * 100 + u.B}");
+        Color c = Color.Blue;
+        Print($"enum {c} {(int)c} {(Color)5}");
+        mut int r = 1;
+        M.Inc(ref r);
+        M.Inc(ref r);
+        mut int o;
+        M.Make(out o);
+        Print($"ref {r} out {o}");
+        mut var xs = new List<int>();
+        for (int i = 0; i < 10; i++) { xs.Add(i * i); }
+        xs.RemoveAt(3);
+        mut int sum = 0;
+        foreach (var x in xs) { sum += x; }
+        mut var ys = xs.Clone();
+        ys.Add(7);
+        xs.Clear();
+        Print($"list {xs.Count} {ys.Count} {sum} {ys[3]} {ys.Contains(81)} {ys.Contains(9)}");
+        float big = 1.0 / 3.0;
+        Print($"float {big} {0.1 + 0.2} {100.0} {1e-7}");
+        Print($"bool {true && !false} {(5 > 3 ? 1 : 2)}");
+        for (int i = 0; i < 3; i++) { Spawn(new Animal { X = i + 1 }); }
+        for (int i = 0; i < 3; i++) { Spawn(new Dog { X = 10 * (i + 1) }); }
+        Spawn(new Wallet());
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick != 1) { return; }
+        mut int n = 0;
+        foreach (var a in Query<Animal>())
+        {
+            n++;
+            if (n == 4) { break; } // must leave the loop over *all* archetypes
+        }
+        mut int hp = 0;
+        mut float xsum = 0;
+        mut int speak = 0;
+        foreach (var a in Query<Animal>()) { hp += a.Hp; xsum += a.X; speak += a.Speak(); }
+        mut int gold = 0;
+        mut int tries = 0;
+        foreach (var w in Query<Wallet>()) { gold += w.Gold; tries += w.Tries; }
+        Print($"break {n}");
+        Print($"deferred hp {hp}");
+        Print($"jacobi x {xsum}");
+        Print($"virtual {speak}");
+        Print($"atomic wallets={Count<Wallet>()} gold={gold} tries={tries}");
+    }
+}

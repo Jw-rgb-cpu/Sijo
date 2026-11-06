@@ -1,0 +1,110 @@
+// particles.sijo — benchmark workload "particles" (self-only update).
+//
+// Every particle only reads and writes itself: gravity, integration, a floor
+// bounce, a lifetime and an in-place respawn driven by a per-particle integer
+// LCG (so that every implementation in bench/ can reproduce it bit for bit).
+// The harness (bench/run.py) substitutes COUNT for each size variant.
+
+using Sijo;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+}
+
+public static class Sim
+{
+    public const int COUNT = 100000;
+    public const float GRAVITY = 9.81;
+    public const float BOUNCE = 0.8;
+    public const float FRICTION = 0.95;
+
+    // 32-bit LCG step (wrapping int arithmetic)
+    public static int Next(int s) => s * 1664525 + 1013904223;
+
+    // 16 random bits of the state as a float in [0, 1)
+    public static float Unit(int s) => (float)((s >> 8) & 65535) / 65536.0;
+
+    // order-independent checksum helper: quantize a float in [-256, 256) losslessly for |v| >= 1
+    public static int Q(float v) => (int)(v * 8388608.0);
+}
+
+public class Particle : Entity
+{
+    public mut SVec2 Pos;
+    public mut SVec2 Vel;
+    public mut float Life;
+    public mut int Seed;
+
+    public void Update(float dt)
+    {
+        Vel = new SVec2(Vel.X, Vel.Y - Sim.GRAVITY * dt);
+        Pos = Pos + Vel * dt;
+        if (Pos.Y < 0)
+        {
+            Pos = new SVec2(Pos.X, -Pos.Y);
+            Vel = new SVec2(Vel.X * Sim.FRICTION, -Vel.Y * Sim.BOUNCE);
+        }
+        Life -= dt;
+        if (Life <= 0)
+        {
+            int s1 = Sim.Next(Seed);
+            int s2 = Sim.Next(s1);
+            int s3 = Sim.Next(s2);
+            Seed = s3;
+            Pos = new SVec2(0, 1);
+            Vel = new SVec2(Sim.Unit(s1) * 20 - 10, Sim.Unit(s2) * 15 + 5);
+            Life = 1 + Sim.Unit(s3) * 3;
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < Sim.COUNT; i++)
+        {
+            int s1 = Sim.Next(i * 7919 + 17);
+            int s2 = Sim.Next(s1);
+            int s3 = Sim.Next(s2);
+            int s4 = Sim.Next(s3);
+            Spawn(new Particle
+            {
+                Pos = new SVec2(Sim.Unit(s1) * 40 - 20, Sim.Unit(s2) * 10),
+                Vel = new SVec2(Sim.Unit(s3) * 20 - 10, Sim.Unit(s4) * 15),
+                Life = Sim.Unit(s4) * 4,
+                Seed = s4
+            });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 100 == 0)
+        {
+            mut int h = 0;
+            foreach (var p in Query<Particle>())
+            {
+                mut int e = Sim.Q(p.Pos.X);
+                e = e * 31 + Sim.Q(p.Pos.Y);
+                e = e * 31 + Sim.Q(p.Vel.X);
+                e = e * 31 + Sim.Q(p.Vel.Y);
+                e = e * 31 + Sim.Q(p.Life);
+                e = e * 31 + p.Seed;
+                h += (e ^ 1540483477) * 668265261;
+            }
+            Print($"bench tick={Time.Tick} n={Count<Particle>()} h={h}");
+        }
+    }
+}

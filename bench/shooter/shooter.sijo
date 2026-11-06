@@ -1,0 +1,243 @@
+// shooter.sijo — benchmark workload "shooter" (spawn/destroy churn, cross-entity writes).
+//
+// A scaled-up examples/arena.sijo: SHIPS ships in two teams fly through a
+// wrapping arena, each targets the nearest enemy and fires bullets at it;
+// bullets damage every ship they touch through deferred commutative writes
+// (ship.Hp -= Damage, owner.Kills += 1); a ship at 0 hp is destroyed and
+// replaced by a fresh ship of the same team (so the population stays constant
+// and both archetypes churn).
+//
+// The rules are written to be independent of iteration order (ties in the
+// nearest-enemy search are broken by Id; a bullet hits *all* ships in range),
+// so implementations that store entities in a different order (std::vector
+// erase-remove vs swap-remove) must still produce identical results.
+// The harness (bench/run.py) substitutes SHIPS and ARENA for each size variant.
+
+using Sijo;
+
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public float LengthSq => X * X + Y * Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+
+    public static SVec2 operator +(SVec2 a, SVec2 b) => new SVec2(a.X + b.X, a.Y + b.Y);
+    public static SVec2 operator -(SVec2 a, SVec2 b) => new SVec2(a.X - b.X, a.Y - b.Y);
+    public static SVec2 operator *(SVec2 a, float s) => new SVec2(a.X * s, a.Y * s);
+
+    public float Length() => Math.Sqrt(X * X + Y * Y);
+}
+
+public enum ETeam
+{
+    Red,
+    Blue
+}
+
+public static class Rules
+{
+    public const int SHIPS = 500;
+    public const float ARENA = 256;
+    public const int MAX_HP = 100;
+    public const float HIT_RADIUS = 1.5;
+    public const float HIT_RADIUS_SQ = HIT_RADIUS * HIT_RADIUS;
+    public const float BULLET_SPEED = 20;
+    public const float RELOAD = 0.6;
+
+    public static int DamageFor(int level) => 5 + level * 3;
+
+    public static int Next(int s) => s * 1664525 + 1013904223;
+
+    public static float Unit(int s) => (float)((s >> 8) & 65535) / 65536.0;
+
+    public static int Q(float v) => (int)(v * 1048576.0);
+
+    public static SVec2 Wrap(SVec2 pos)
+    {
+        mut float x = pos.X;
+        mut float y = pos.Y;
+        if (x < 0)
+        {
+            x += ARENA;
+        }
+        if (x >= ARENA)
+        {
+            x -= ARENA;
+        }
+        if (y < 0)
+        {
+            y += ARENA;
+        }
+        if (y >= ARENA)
+        {
+            y -= ARENA;
+        }
+        return new SVec2(x, y);
+    }
+}
+
+public class Ship : Entity
+{
+    public mut SVec2 Pos;
+    public SVec2 Vel;
+    public mut int Hp = Rules.MAX_HP;
+    public ETeam Side;
+    public mut float Cooldown;
+    public mut int Kills;
+    public int Id;
+    public mut Ship? Target;
+
+    public void Update(float dt)
+    {
+        steer();
+        Pos = Rules.Wrap(Pos + Vel * dt);
+        Cooldown -= dt;
+        if (Cooldown <= 0 && Target is Ship target)
+        {
+            SVec2 dir = target.Pos - Pos;
+            float len = dir.Length();
+            if (len > 0.001)
+            {
+                Spawn(new Bullet { Pos = Pos, Vel = dir * (Rules.BULLET_SPEED / len), Owner = this, Damage = Rules.DamageFor(2) });
+            }
+            Cooldown = Rules.RELOAD;
+        }
+        if (Hp <= 0)
+        {
+            // replaced by a fresh ship of the same team, at a position derived from its id
+            int newId = Id + Rules.SHIPS;
+            int s1 = Rules.Next(newId * 7919 + 17);
+            int s2 = Rules.Next(s1);
+            int s3 = Rules.Next(s2);
+            int s4 = Rules.Next(s3);
+            Spawn(new Ship
+            {
+                Pos = new SVec2(Rules.Unit(s1) * Rules.ARENA, Rules.Unit(s2) * Rules.ARENA),
+                Vel = new SVec2(Rules.Unit(s3) * 6 - 3, Rules.Unit(s4) * 6 - 3),
+                Side = Side,
+                Cooldown = Rules.Unit(s4) * Rules.RELOAD,
+                Id = newId
+            });
+            Destroy();
+        }
+    }
+
+    // nearest enemy; reads other ships = start-of-system snapshot
+    void steer()
+    {
+        mut Ship? best = null;
+        mut float bestD = 1000000000;
+        mut int bestId = 0;
+        foreach (var other in Query<Ship>())
+        {
+            if (other.Side != Side)
+            {
+                float distSq = (other.Pos - Pos).LengthSq;
+                if (distSq < bestD || (distSq == bestD && other.Id < bestId))
+                {
+                    bestD = distSq;
+                    bestId = other.Id;
+                    best = other;
+                }
+            }
+        }
+        Target = best;
+    }
+}
+
+public class Bullet : Entity
+{
+    public mut SVec2 Pos;
+    public SVec2 Vel;
+    public Ship? Owner;
+    public int Damage = 5;
+    public mut float Life = 1.5;
+
+    public void Update(float dt)
+    {
+        Pos = Pos + Vel * dt;
+        Life -= dt;
+        if (Life <= 0 || Pos.X < 0 || Pos.Y < 0 || Pos.X > Rules.ARENA || Pos.Y > Rules.ARENA)
+        {
+            Destroy();
+            return;
+        }
+        mut bool hit = false;
+        foreach (var ship in Query<Ship>())
+        {
+            if (ship != Owner && (ship.Pos - Pos).LengthSq < Rules.HIT_RADIUS_SQ)
+            {
+                ship.Hp -= Damage;               // remote write -> deferred, commutative merge
+                if (Owner is Ship owner)
+                {
+                    owner.Kills += 1;
+                }
+                hit = true;
+            }
+        }
+        if (hit)
+        {
+            Destroy();
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < Rules.SHIPS; i++)
+        {
+            int s1 = Rules.Next(i * 7919 + 17);
+            int s2 = Rules.Next(s1);
+            int s3 = Rules.Next(s2);
+            int s4 = Rules.Next(s3);
+            Spawn(new Ship
+            {
+                Pos = new SVec2(Rules.Unit(s1) * Rules.ARENA, Rules.Unit(s2) * Rules.ARENA),
+                Vel = new SVec2(Rules.Unit(s3) * 6 - 3, Rules.Unit(s4) * 6 - 3),
+                Side = i % 2 == 0 ? ETeam.Red : ETeam.Blue,
+                Cooldown = Rules.Unit(s4) * Rules.RELOAD,
+                Id = i
+            });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 100 == 0)
+        {
+            mut int hs = 0;
+            mut int kills = 0;
+            foreach (var s in Query<Ship>())
+            {
+                mut int e = s.Id;
+                e = e * 31 + s.Hp;
+                e = e * 31 + s.Kills;
+                e = e * 31 + Rules.Q(s.Pos.X);
+                e = e * 31 + Rules.Q(s.Pos.Y);
+                e = e * 31 + Rules.Q(s.Cooldown);
+                hs += (e ^ 1540483477) * 668265261;
+                kills += s.Kills;
+            }
+            mut int hb = 0;
+            foreach (var b in Query<Bullet>())
+            {
+                mut int e = Rules.Q(b.Pos.X);
+                e = e * 31 + Rules.Q(b.Pos.Y);
+                e = e * 31 + Rules.Q(b.Vel.X);
+                e = e * 31 + Rules.Q(b.Vel.Y);
+                e = e * 31 + Rules.Q(b.Life);
+                hb += (e ^ 1540483477) * 668265261;
+            }
+            Print($"bench tick={Time.Tick} ships={Count<Ship>()} bullets={Count<Bullet>()} kills={kills} hs={hs} hb={hb}");
+        }
+    }
+}

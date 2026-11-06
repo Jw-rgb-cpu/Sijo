@@ -1,0 +1,30 @@
+t1 z booms 0 fuse - tag - log 
+t1 y booms 0 fuse 0 tag - log 
+t1 x booms 0 fuse 0 tag first:1:010 log 
+t2 z booms 0 fuse - tag late-z:2:000 log 
+t2 y booms 0 fuse 0 tag - log 
+t2 x booms 0 fuse 0 tag first:2:011 log 
+t3 z booms 0 fuse - tag - log 
+t3 y booms 0 fuse 2 tag - log 
+t3 x booms 0 fuse 0 tag - log 
+t4 z booms 0 fuse - tag - log 
+t4 y booms 1 fuse - tag - log boom@4
+t4 x booms 0 fuse 3 tag - log 
+t5 z booms 0 fuse - tag - log 
+t5 y booms 1 fuse - tag - log boom@4
+t5 x booms 1 fuse - tag again:0:000 log boom@5
+t6 z booms 0 fuse - tag - log 
+t6 x booms 1 fuse - tag again:1:100 log boom@5
+t6 y booms 1 fuse 0 tag - log boom@4
+t7 z booms 0 fuse - tag - log 
+t7 x booms 1 fuse - tag again:2:110 log boom@5
+t7 y booms 1 fuse 0 tag - log boom@4
+t8 z booms 0 fuse - tag - log 
+t8 x booms 1 fuse - tag - log boom@5
+t8 y booms 1 fuse 1 tag - log boom@4
+t9 z booms 0 fuse - tag - log 
+t9 x booms 1 fuse - tag - log boom@5
+t9 y booms 2 fuse - tag - log boom@4,boom@9
+t10 z booms 0 fuse - tag - log 
+t10 x booms 1 fuse - tag - log boom@5
+t10 y booms 2 fuse - tag - log boom@4,boom@9

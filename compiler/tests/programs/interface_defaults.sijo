@@ -1,0 +1,263 @@
+// Default implementations and generic interfaces (tests/interface_rules.rs, expected output in
+// interface_defaults.expected): defaults called on `this`, through handles (read at once, or as
+// a deferred call) and through Query; overrides of a default, a default given again by an
+// interface that extends another, a default `Update` system; a generic interface implemented by
+// an entity class, a struct and a generic struct; Query over an interface instance; a
+// `where C : IContainer<T>` constraint and a type argument inferred from a handle.
+public interface IDamageable
+{
+    int Threat => Health() * 2;
+
+    void Damage(int amount);
+    int Health();
+
+    bool IsAlive() => Health() > 0;
+
+    void Finish()
+    {
+        Damage(Health());
+    }
+}
+
+// a more specific default for Threat
+public interface IArmored : IDamageable
+{
+    int Threat => Health() * 2 + Armor();
+
+    int Armor();
+}
+
+// every entity that implements ITicker and has no Update of its own runs this one as its system
+public interface ITicker
+{
+    void Tick();
+
+    void Update(float dt)
+    {
+        Tick();
+    }
+}
+
+public interface IContainer<T>
+{
+    void Put(T x);
+    T Peek();
+    int Count();
+
+    bool IsEmpty() => Count() == 0;
+
+    T PeekOr(T fallback) => IsEmpty() ? fallback : Peek();
+}
+
+public abstract class Unit : Entity, IDamageable, ITicker
+{
+    public mut int Hp = 10;
+    public mut int Ticks;
+    public IDamageable? Target;
+
+    public void Damage(int amount)
+    {
+        Hp -= amount;
+    }
+
+    public int Health() => Hp;
+
+    public void Tick()
+    {
+        Ticks += 1;
+        if (Target is IDamageable t)
+        {
+            if (Ticks % 2 == 0 && t.IsAlive())
+            {
+                t.Damage(1);
+            }
+        }
+    }
+}
+
+// every default of IDamageable and ITicker
+public class Orc : Unit
+{
+}
+
+public class Troll : Unit, IArmored
+{
+    public int Armor() => 3;
+
+    // trolls keep going for a while: this wins over the default
+    public bool IsAlive() => Hp > -5;
+}
+
+public class Wall : Entity, IDamageable, IContainer<int>
+{
+    public mut int Stones = 4;
+    public mut int Stored;
+    public mut int Last;
+
+    public void Damage(int amount)
+    {
+        Stones -= amount;
+    }
+
+    public int Health() => Stones;
+
+    public void Put(int x)
+    {
+        Stored += 1;
+        Last = x;
+    }
+
+    public int Peek() => Last;
+
+    public int Count() => Stored;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick == 3)
+        {
+            // the default property, on this
+            Put(Threat);
+        }
+    }
+}
+
+public class Gun : Entity, IContainer<int>
+{
+    public IDamageable? Target;
+    public mut int Shots;
+
+    public void Put(int x)
+    {
+        Shots += x;
+    }
+
+    public int Peek() => Shots;
+
+    public int Count() => Shots;
+
+    public void Update(float dt)
+    {
+        if (Target is IDamageable t)
+        {
+            // a default read through a handle; a default called on another entity (deferred)
+            if (t.IsAlive())
+            {
+                t.Damage(2);
+                Put(1);
+                if (Time.Tick == 3)
+                {
+                    t.Finish();
+                }
+            }
+        }
+    }
+}
+
+public struct SCounter : IContainer<float>
+{
+    public float Last;
+    public int N;
+
+    public mut void Put(float x)
+    {
+        Last = x;
+        N += 1;
+    }
+
+    public float Peek() => Last;
+
+    public int Count() => N;
+}
+
+public struct SStack<T> : IContainer<T>
+{
+    public T Top;
+    public int N;
+
+    public mut void Put(T x)
+    {
+        Top = x;
+        N += 1;
+    }
+
+    public T Peek() => Top;
+
+    public int Count() => N;
+
+    // the struct's own version wins (the default PeekOr calls this one)
+    public bool IsEmpty() => N <= 0;
+}
+
+public static class Game
+{
+    public static T Fill<C, T>(mut C box, T a, T b) where C : IContainer<T>
+    {
+        T before = box.PeekOr(a);
+        box.Put(a);
+        box.Put(b);
+        return box.IsEmpty() ? before : box.Peek();
+    }
+
+    // T inferred from the handle: IContainer<int> for a Wall
+    public static T Top<T>(IContainer<T> c) => c.PeekOr(default(T));
+
+    public static void Start()
+    {
+        var wall = Spawn(new Wall());
+        var orc = Spawn(new Orc { Target = wall });
+        Spawn(new Troll { Hp = 6, Target = orc });
+        Spawn(new Gun { Target = orc });
+        SCounter counter = new SCounter();
+        float got = Fill(counter, 1.5f, 2.5f);
+        mut SStack<int> stack = new SStack<int>();
+        int none = stack.PeekOr(-1);
+        stack.Put(7);
+        Print($"fill {got} counter empty {counter.IsEmpty()} stack {none} {stack.PeekOr(-1)} fill {Fill(stack, 3, 4)} stack {stack.Count()}");
+    }
+
+    public static void Update(float dt)
+    {
+        mut int alive = 0;
+        mut int threat = 0;
+        mut string hp = "";
+        foreach (var d in Query<IDamageable>())
+        {
+            if (d.IsAlive())
+            {
+                alive++;
+            }
+            threat += d.Threat;
+            hp += $"{d.Health()} ";
+        }
+        mut int stored = 0;
+        mut int empty = 0;
+        foreach (var c in Query<IContainer<int>>())
+        {
+            if (c.IsEmpty())
+            {
+                empty++;
+            }
+            stored += c.PeekOr(0);
+        }
+        mut int ticks = 0;
+        foreach (var u in Query<Unit>())
+        {
+            ticks = ticks * 100 + u.Ticks;
+        }
+        Print($"t{Time.Tick}: alive {alive} threat {threat} stored {stored} empty {empty} ticks {ticks} hp {hp}");
+        if (Time.Tick == 6)
+        {
+            foreach (var c in Query<IContainer<int>>())
+            {
+                c.Put(Time.Tick);
+            }
+        }
+        if (Time.Tick == 7)
+        {
+            foreach (var w in Query<Wall>())
+            {
+                Print($"top {Top(w)}");
+            }
+        }
+    }
+}

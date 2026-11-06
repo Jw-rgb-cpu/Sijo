@@ -1,0 +1,66 @@
+// await Rush(...): continues when the first arm finishes (its index is the value), and the method
+// arms that have not finished keep running in the background, one step per tick, until they end.
+// Awaiting a method that is running in the background restarts it in the foreground.
+// Expected output: the timeline below (60 Hz).
+public class Scout : Entity
+{
+    public int Id;
+    public mut int Walked;
+    public mut int Sung;
+    public mut string Trace = "";
+
+    public async void Walk(int steps)
+    {
+        for (int i = 0; i < steps; i++)
+        {
+            Walked++;
+            await NextTick();
+        }
+        Trace += $" walked@{Time.Tick}";
+    }
+
+    public async void Sing(int verses)
+    {
+        for (int i = 0; i < verses; i++)
+        {
+            Sung++;
+            await Wait(0.05f);
+        }
+        Trace += $" sung@{Time.Tick}";
+    }
+
+    public async void Run()
+    {
+        // scout 0: a 3-tick wait wins over a 6-step walk (left running); scout 1's 2-step walk wins
+        mut int w = await Rush(Walk(6 - Id * 4), Wait(0.05f));
+        Trace += $" r{w}@{Time.Tick}";
+        // Walk(5) restarts the walk the first Rush left running; Sing finishes first and Walk then
+        // finishes alone in the background (walked@ while this coroutine waits below)
+        w = await Rush(Sing(1), Walk(5));
+        Trace += $" r{w}@{Time.Tick}";
+        await Wait(0.05f);
+        // awaiting Walk again restarts it in the foreground (the background run stops)
+        await Walk(2);
+        Trace += $" w@{Time.Tick}";
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Scout { Id = 0 });
+        Spawn(new Scout { Id = 1 });
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 4 == 0 || Time.Tick == 25)
+        {
+            foreach (var s in Query<Scout>())
+            {
+                Print($"t{Time.Tick} s{s.Id} walked={s.Walked} sung={s.Sung} [{s.Trace.Trim()}]");
+            }
+        }
+    }
+}

@@ -1,0 +1,11 @@
+Hello, world
+[한글 텍스트] len=6 idx=5 sub=텍스트
+a | b | c True True
+43 5 -1
+x-y True
+tryparse True False 0 True 0.25
+switch on string ok
+Unit-8/Archmage 8 log=4 last=lv8 bag=potion#6 best=UNIT-8/ARCHMAGE 8:17
+Unit-8/Sir 8 log=4 last=lv8 bag=potion#6 best=UNIT-8/SIR 8:12
+Unit-300/Archmage 300 log=150 last=lv300 bag=potion#6 best=UNIT-300/ARCHMAGE 300:21
+Unit-300/Sir 300 log=150 last=lv300 bag=potion#6 best=UNIT-300/SIR 300:16

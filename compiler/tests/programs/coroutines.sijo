@@ -1,0 +1,87 @@
+// Coroutines: async entity methods with await NextTick/Wait/Until. Their frame (resume point,
+// timer, locals that live across awaits) is ECS state: parallel, deterministic, saved with the world.
+public struct SVec2
+{
+    public float X;
+    public float Y;
+
+    public SVec2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public class Guard : Entity
+{
+    public mut SVec2 Pos;
+    public mut int Hp = 100;
+    public mut int Laps;
+    public mut string Mood = "calm";
+
+    public async void Patrol()
+    {
+        for (int lap = 0; lap < 3; lap++)
+        {
+            float speed = 1 + lap;
+            for (int step = 0; step < 4; step++)
+            {
+                Pos.X += speed;
+                await NextTick();
+            }
+            Mood = $"resting after lap {lap}";
+            await Wait(0.1);
+            Laps += 1;
+        }
+        await Until(Hp < 50);
+        Mood = "hurt";
+    }
+
+    public void Update(float dt)
+    {
+        if (Laps == 3)
+        {
+            Hp -= 10;
+        }
+    }
+}
+
+public class Director : Entity
+{
+    public mut int Wave;
+
+    public async void Run()
+    {
+        while (Wave < 3)
+        {
+            Wave += 1;
+            for (int i = 0; i < Wave; i++)
+            {
+                Spawn(new Guard { Pos = new SVec2(i * 10, Wave) });
+            }
+            Print($"tick {Time.Tick}: wave {Wave} spawned, guards={Count<Guard>()}");
+            await Until(Count<Guard>() >= Wave * (Wave + 1) / 2);
+            await Wait(0.5);
+        }
+        Print($"tick {Time.Tick}: director done");
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Director());
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick == 40 || Time.Tick == 120)
+        {
+            foreach (var g in Query<Guard>())
+            {
+                Print($"tick {Time.Tick}: guard x={g.Pos.X} y={g.Pos.Y} laps={g.Laps} hp={g.Hp} mood={g.Mood}");
+            }
+        }
+    }
+}

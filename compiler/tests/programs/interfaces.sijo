@@ -1,0 +1,163 @@
+// Interfaces: entity classes (and structs) implement them; a handle of an interface holds any
+// entity class that implements it, calls dispatch per archetype, Query<I>() visits every
+// implementing archetype, `is` tests for an interface, and `where T : I` accepts structs that
+// implement it (tests/e2e.rs, expected output in interfaces.expected).
+public interface IDamageable
+{
+    void Damage(int amount);
+    bool IsAlive();
+}
+
+public interface IHealable : IDamageable
+{
+    void Heal(int amount);
+}
+
+public interface IShape
+{
+    float Area();
+}
+
+public struct SCircle : IShape
+{
+    public float R;
+    public float Area() => 3.0f * R * R;
+}
+
+public struct SRect : IShape
+{
+    public float W;
+    public float H;
+    public float Area() => W * H;
+}
+
+// an abstract class may leave interface methods to its subclasses
+public abstract class Unit : Entity, IDamageable
+{
+    public mut int Hp = 10;
+    public IDamageable? Target;
+
+    public void Damage(int amount)
+    {
+        Hp -= amount;
+    }
+
+    public abstract bool IsAlive();
+
+    // client code reads the interface-typed reference: it is replicated like any entity reference
+    public client void Render()
+    {
+        Draw.Text(0, 0, Target is IDamageable t ? "aim" : "idle");
+    }
+
+    public void Update(float dt)
+    {
+        if (Time.Tick % 2 == 0 && Target is IDamageable t)
+        {
+            t.Damage(1);
+        }
+    }
+}
+
+public class Orc : Unit
+{
+    public override bool IsAlive() => Hp > 0;
+}
+
+public class Wall : Entity, IDamageable
+{
+    public mut int Stones = 3;
+
+    public void Damage(int amount)
+    {
+        Stones -= amount;
+        if (Stones <= 0)
+        {
+            Destroy(this);
+        }
+    }
+
+    public bool IsAlive() => Stones > 0;
+}
+
+public class Healer : Entity, IHealable
+{
+    public mut int Hp = 5;
+
+    public void Damage(int amount)
+    {
+        Hp -= amount;
+    }
+
+    public void Heal(int amount)
+    {
+        Hp += amount;
+    }
+
+    public bool IsAlive() => Hp > 0;
+}
+
+public static class Game
+{
+    public static float TotalArea<T>(List<T> shapes) where T : IShape
+    {
+        mut float sum = 0;
+        foreach (var s in shapes)
+        {
+            sum += s.Area();
+        }
+        return sum;
+    }
+
+    public static void Start()
+    {
+        var wall = Spawn(new Wall());
+        var healer = Spawn(new Healer());
+        Spawn(new Orc { Target = wall });
+        Spawn(new Orc { Target = healer, Hp = 4 });
+        var circles = new List<SCircle> { new SCircle { R = 1 }, new SCircle { R = 2 } };
+        var rects = new List<SRect> { new SRect { W = 2, H = 3 } };
+        Print($"areas {TotalArea(circles)} {TotalArea(rects)}");
+    }
+
+    public static void Update(float dt)
+    {
+        mut int alive = 0;
+        mut int healable = 0;
+        mut int total = 0;
+        foreach (var d in Query<IDamageable>())
+        {
+            total++;
+            if (d.IsAlive())
+            {
+                alive++;
+            }
+            if (d is IHealable h)
+            {
+                healable++;
+                if (Time.Tick % 3 == 0)
+                {
+                    h.Heal(2);
+                }
+            }
+        }
+        if (Time.Tick == 1)
+        {
+            foreach (var o in Query<Orc>())
+            {
+                o.Damage(1);
+            }
+        }
+        mut int orcHp = 0;
+        foreach (var o in Query<Orc>())
+        {
+            orcHp = orcHp * 100 + o.Hp;
+        }
+        mut int healerHp = 0;
+        foreach (var hl in Query<Healer>())
+        {
+            healerHp = hl.Hp;
+        }
+        Print($"t{Time.Tick}: {total} damageable, {alive} alive, {healable} healable; orcs {orcHp}, healer {healerHp}");
+    }
+}

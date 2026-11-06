@@ -1,0 +1,51 @@
+// Client prediction: Boost() changes only replicated fields of its own entity and reads only
+// replicated state, so a client that calls it (an RPC) also runs it on its own world at once and
+// sees the result in the same client frame; when snapshots arrive the client goes back to the
+// server's values and re-runs the boosts the server has not executed yet. The server also changes
+// Energy on its own (decay), so the client's copy must follow both. Each client prints how many
+// boosts it sees: with prediction always all of them, however late the server confirms
+// (tests/net_e2e.rs).
+public class Ship : Entity
+{
+    public mut int in 0..100 Energy = 50;
+    public mut int Boosts;
+
+    public void Update(float dt)
+    {
+        if (Time.Tick % 10 == 0 && Energy > 0)
+        {
+            Energy -= 1;
+        }
+    }
+
+    public void Boost(int amount)
+    {
+        Energy = Math.Min(Energy + amount, 100);
+        Boosts++;
+    }
+
+    public client void Input()
+    {
+        if (Time.Tick % 7 == 0)
+        {
+            Boost(3);
+        }
+    }
+
+    public client void Render()
+    {
+        Draw.Text(0, 0, $"{Energy}");
+        if (Time.Tick % 7 == 0)
+        {
+            Print($"t{Time.Tick} sees {Boosts} of {Time.Tick / 7}");
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new Ship());
+    }
+}

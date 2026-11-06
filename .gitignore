@@ -1,0 +1,7 @@
+compiler/target/
+*.o
+/out/
+
+# local tool state (agent worktrees)
+.claude/
+__pycache__/

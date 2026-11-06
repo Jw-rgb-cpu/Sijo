@@ -1,0 +1,39 @@
+tick 3: pools 2 1 cap 3
+  IntPool score=36 sum=6
+  Pool<int> score=5 items=5 ticks=3
+  Pool<SVec2> score=3 last=2
+  unit hp=90 taken=8
+  unit hp=94 taken=4
+  Hunter<Orc> hunting after 0 shots=2
+  Hunter<Elf> hunting after 0 shots=2
+  Labeled<string> marks=4 history=2 value=a
+  Labeled<int> marks=4 history=2 value=7
+  Pair<string, string> a b steps=0
+  Pair<float, int> 0.5 4 steps=0
+  home seen=4
+tick 6: pools 2 1 cap 3
+  IntPool score=36 sum=6
+  Pool<int> score=8 items=8 ticks=6
+  Pool<SVec2> score=3 last=2
+  unit hp=75 taken=20
+  unit hp=85 taken=10
+  Hunter<Orc> hunting after 0 shots=5
+  Hunter<Elf> hunting after 0 shots=5
+  Labeled<string> marks=10 history=5 value=a
+  Labeled<int> marks=10 history=5 value=7
+  Pair<string, string> b b steps=1
+  Pair<float, int> 4 4 steps=1
+  home seen=7
+tick 9: pools 2 1 cap 3
+  IntPool score=36 sum=6
+  Pool<int> score=11 items=11 ticks=9
+  Pool<SVec2> score=3 last=2
+  unit hp=60 taken=32
+  unit hp=76 taken=16
+  Hunter<Orc> hunting after 0 shots=8
+  Hunter<Elf> hunting after 0 shots=8
+  Labeled<string> marks=16 history=8 value=a
+  Labeled<int> marks=16 history=8 value=7
+  Pair<string, string> b b steps=2
+  Pair<float, int> 4 4 steps=2
+  home seen=10

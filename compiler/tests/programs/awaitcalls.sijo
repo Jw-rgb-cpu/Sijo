@@ -1,0 +1,85 @@
+// Coroutines awaiting other coroutines: await M(args) starts M (it runs at once, until its first
+// await) and resumes it every tick until it finishes; arguments are evaluated once. Awaited
+// methods are not systems of their own. Nested awaits, loops of awaits, and early returns.
+public class Guard : Entity
+{
+    public int Id;
+    public mut float X;
+    public mut int Steps;
+    public mut string Trace = "";
+
+    public async void Patrol()
+    {
+        Trace += "start ";
+        await MoveTo(5, 1);
+        Trace += $"at{(int)X} ";
+        await Rest(2);
+        for (int i = 0; i < 2; i++)
+        {
+            await MoveTo(X - 2, 1);
+            Trace += $"back{i} ";
+        }
+        await Shout("done");
+        Trace += "end";
+    }
+
+    async void MoveTo(float target, float speed)
+    {
+        while (X < target - 0.01 || X > target + 0.01)
+        {
+            if (X < target)
+            {
+                X = Math.Min(X + speed, target);
+            }
+            else
+            {
+                X = Math.Max(X - speed, target);
+            }
+            Steps++;
+            await NextTick();
+        }
+    }
+
+    async void Rest(int ticks)
+    {
+        mut int left = ticks + Id % 2;
+        while (left > 0)
+        {
+            left--;
+            await NextTick();
+        }
+        if (Id == 99)
+        {
+            return;
+        }
+        await MoveTo(X + 1, 0.5);
+    }
+
+    async void Shout(string word)
+    {
+        Trace += word + "! ";
+        await Wait(0.05);
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            Spawn(new Guard { Id = i, X = i });
+        }
+    }
+
+    public static void Update(float dt)
+    {
+        if (Time.Tick % 4 == 0 || Time.Tick == 30)
+        {
+            foreach (var g in Query<Guard>())
+            {
+                Print($"t{Time.Tick} g{g.Id} x={g.X:F1} steps={g.Steps} [{g.Trace}]");
+            }
+        }
+    }
+}

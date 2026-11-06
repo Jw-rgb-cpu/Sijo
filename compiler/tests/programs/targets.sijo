@@ -1,0 +1,76 @@
+// Replicated entity references: client code follows Target to read the target's state.
+// References travel as server slot + generation and are mapped to the client's own handles once
+// a snapshot is applied (targets spawned by the same snapshot included); references to dead
+// entities arrive as null.
+public struct V2
+{
+    public float X;
+    public float Y;
+
+    public V2(float x, float y)
+    {
+        X = x;
+        Y = y;
+    }
+}
+
+public class Ship : Entity
+{
+    public mut V2 in 0..100 Pos;
+    public int Id;
+    public mut int Hp = 30;
+    public mut Ship? Target;
+
+    public void Update(float dt)
+    {
+        // retarget every few ticks: the next ship by id (wrapping), so references change often
+        if (Time.Tick % 4 == Id % 4 || Target == null)
+        {
+            mut Ship? best = null;
+            mut int bestKey = 1000000;
+            foreach (var s in Query<Ship>())
+            {
+                int key = (s.Id - Id + 1000) % 1000;
+                if (s != this && key < bestKey)
+                {
+                    bestKey = key;
+                    best = s;
+                }
+            }
+            Target = best;
+        }
+        if (Target is Ship t)
+        {
+            t.Hp -= 1;
+        }
+        Pos = new V2((Pos.X + 0.7) % 100, (Pos.Y + 0.3 * Id) % 100);
+        if (Hp <= 0)
+        {
+            Spawn(new Ship { Id = Id + 100, Pos = new V2(Id, Id) });
+            Destroy();
+        }
+    }
+
+    public client void Render()
+    {
+        if (Target is Ship t)
+        {
+            Draw.Sprite(t.Id % 7, t.Pos.X, t.Pos.Y);
+        }
+        else
+        {
+            Draw.Sprite(9, Pos.X, Pos.Y);
+        }
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        for (int i = 0; i < 12; i++)
+        {
+            Spawn(new Ship { Id = i, Pos = new V2(i * 7, i * 3) });
+        }
+    }
+}
