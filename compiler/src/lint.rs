@@ -20,6 +20,9 @@ use std::path::Path;
 pub enum Preset {
     Standard,
     Dotnet,
+    /// the Sijo coding standard for game code: single letters are fine for numbers and vectors
+    /// (x, y, r, t, n, i, v: coordinates, radii, times, counts, cell indexes); the rest as Standard
+    Game,
 }
 
 pub struct RuleInfo {
@@ -77,7 +80,18 @@ pub const RULES: &[RuleInfo] = &[
     RuleInfo { code: "L406", name: "hazard-double-buffer", standard: H, dotnet: H, source: "sijoc ECS planner", desc: "field read on other entities and written on self: double-buffered (memcpy per tick)" },
     RuleInfo { code: "L407", name: "spawn-in-system", standard: H, dotnet: H, source: "sijoc scheduler", desc: "Spawn whose handle is used keeps an entity system serial" },
     RuleInfo { code: "L408", name: "alloc-in-loop", standard: W, dotnet: W, source: "sijoc memory planner", desc: "new list allocated on every loop iteration" },
+    RuleInfo { code: "L409", name: "extern-in-system", standard: W, dotnet: W, source: "sijoc scheduler", desc: "a host function call (extern) keeps an entity system serial" },
 ];
+
+/// How much a finding matters to the game, for ordering summaries: 3 = game rules (L4xx: what runs
+/// in parallel, what is sent, what allocates), 1 = correctness (L3xx), 0 = names and layout.
+pub fn importance(code: &str) -> u8 {
+    match code.as_bytes().get(1) {
+        Some(b'4') => 3,
+        Some(b'3') => 1,
+        _ => 0,
+    }
+}
 
 pub fn rule(code: &str) -> Option<&'static RuleInfo> {
     RULES.iter().find(|r| r.code == code || r.name == code)
@@ -103,7 +117,7 @@ impl LintConfig {
             return *l;
         }
         match self.preset {
-            Preset::Standard => r.standard,
+            Preset::Standard | Preset::Game => r.standard,
             Preset::Dotnet => r.dotnet,
         }
     }
@@ -124,7 +138,8 @@ impl LintConfig {
                     c.preset = match v {
                         "standard" => Preset::Standard,
                         "dotnet" | "csharp" => Preset::Dotnet,
-                        _ => return Err(format!(".sijolint line {}: unknown preset '{}' (standard | dotnet)", i + 1, v)),
+                        "game" => Preset::Game,
+                        _ => return Err(format!(".sijolint line {}: unknown preset '{}' (standard | game | dotnet)", i + 1, v)),
                     }
                 }
                 "max-complexity" => c.max_complexity = v.parse().map_err(|_| format!(".sijolint line {}: expected a number", i + 1))?,
@@ -611,7 +626,8 @@ impl<'a> Linter<'a> {
         if !name.chars().next().map(|c| c.is_ascii()).unwrap_or(true) {
             return; // scripts without letter case (e.g. Hangul): case conventions do not apply
         }
-        let standard = self.cfg.preset == Preset::Standard;
+        let standard = matches!(self.cfg.preset, Preset::Standard | Preset::Game);
+        let game = self.cfg.preset == Preset::Game;
         let mut issues: Vec<(&'static str, String)> = vec![];
         let mut expected: String;
         match &kind {
@@ -724,7 +740,9 @@ impl<'a> Linter<'a> {
                     }
                     expected = format!("b{}", to_pascal(base));
                 }
-                if name.chars().count() == 1 && !loop_index && !matches!(name.as_str(), "x" | "y" | "z") && self.on("L113") {
+                // the game preset: a single letter is fine for a number or a vector (math and coordinates)
+                let math = game && matches!(ty, Ty::Int | Ty::Float | Ty::Char | Ty::Struct(_) | Ty::Enum(_));
+                if name.chars().count() == 1 && !loop_index && !math && !matches!(name.as_str(), "x" | "y" | "z") && self.on("L113") {
                     issues.push(("L113", format!("'{}' is not descriptive (single letters are for loop indices)", name)));
                 }
             }
@@ -1316,6 +1334,7 @@ impl<'a> Linter<'a> {
     fn game_rules(&mut self) {
         let p = self.p;
         let c = self.c;
+        let in_systems = entity_system_callers(p, c);
         for (fid, f) in p.funcs.iter().enumerate() {
             let entity_server = matches!(f.kind, FuncKind::EntityMethod(_)) && f.ctx == Ctx::Server;
             let client = f.ctx == Ctx::Client;
@@ -1351,6 +1370,20 @@ impl<'a> Linter<'a> {
                 }
                 ExprKind::Builtin { f: Builtin::Print, .. } if entity_server => {
                     hits.push(("L403", e.span, "Print inside an entity system forces the whole system to run serially".into(), Some("log from Game.Update, or aggregate counts and print once".into())));
+                }
+                ExprKind::Call { func, .. } if p.funcs[*func].extern_name.is_some() && !p.funcs[*func].pure_attr && !p.funcs[*func].deferred_attr => {
+                    if let Some(systems) = in_systems.get(&fid) {
+                        hits.push((
+                            "L409",
+                            e.span,
+                            format!("'{}' is a host function (extern): calling it here makes {} run serially (host calls happen in call order)", p.func_label(*func), systems.join(", ")),
+                            Some(if p.funcs[*func].ret == Ty::Void {
+                                "mark the extern [Deferred] (its calls are queued per thread and run in row order at the end of the system), or collect the values in fields and call it once from Game.Update".to_string()
+                            } else {
+                                "collect what it needs in fields and call it once from Game.Update, or mark it [Pure] if it has no effects".to_string()
+                            }),
+                        ));
+                    }
                 }
                 ExprKind::Builtin { f: Builtin::RandomFloat | Builtin::RandomInt, .. } if client => {
                     hits.push(("L405", e.span, "Random in client code produces values the server never sees".into(), Some("derive client effects from replicated state, or compute the random value on the server".into())));
@@ -1970,15 +2003,84 @@ pub fn local_reads(p: &Program) -> Vec<HashSet<LocalId>> {
 pub fn int_divisions_as_float(p: &Program) -> Vec<Span> {
     let mut v = vec![];
     for f in &p.funcs {
+        // index arithmetic: `n / W` next to `n % W` turns a cell index into coordinates, and the
+        // truncation is the point (Draw.Sprite(1, n % W, n / W))
+        let mut rems: Vec<(Expr, Expr)> = vec![];
+        crate::sema::visit_block(&f.body, &mut |e| {
+            if let ExprKind::Binary(BinOp::Rem, a, b) = &e.kind {
+                rems.push(((**a).clone(), (**b).clone()));
+            }
+        });
         crate::sema::visit_block(&f.body, &mut |e| {
             if let ExprKind::Cast(inner) = &e.kind {
                 if e.ty == Ty::Float && inner.ty == Ty::Int {
-                    if let ExprKind::Binary(BinOp::Div, _, _) = inner.kind {
-                        v.push(inner.span);
+                    if let ExprKind::Binary(BinOp::Div, a, b) = &inner.kind {
+                        if !rems.iter().any(|(x, y)| same_operand(a, x) && same_operand(b, y)) {
+                            v.push(inner.span);
+                        }
                     }
                 }
             }
         });
     }
     v
+}
+
+/// the same simple operand (a local, a constant, a field of this, a struct member of those)
+fn same_operand(a: &Expr, b: &Expr) -> bool {
+    match (&a.kind, &b.kind) {
+        (ExprKind::Local(x), ExprKind::Local(y)) => x == y,
+        (ExprKind::Int(x), ExprKind::Int(y)) => x == y,
+        (ExprKind::Const(x), ExprKind::Const(y)) => x == y,
+        (ExprKind::EField { base: ba, field: fa }, ExprKind::EField { base: bb, field: fb }) => fa == fb && (matches!((&ba.kind, &bb.kind), (ExprKind::SelfRef, ExprKind::SelfRef)) || same_operand(ba, bb)),
+        (ExprKind::Field { base: ba, sid: sa, idx: ia }, ExprKind::Field { base: bb, sid: sb, idx: ib }) => sa == sb && ia == ib && same_operand(ba, bb),
+        (ExprKind::Cast(x), _) => same_operand(x, b),
+        (_, ExprKind::Cast(y)) => same_operand(a, y),
+        _ => false,
+    }
+}
+
+/// The functions each entity system runs synchronously (its method, the methods of `this` and the
+/// static functions it calls, and what those call): function -> names of the systems.
+fn entity_system_callers(p: &Program, c: &crate::driver::Compiled) -> HashMap<FuncId, Vec<String>> {
+    let mut out: HashMap<FuncId, Vec<String>> = HashMap::new();
+    for s in &c.ecs.systems {
+        if s.kind != crate::ecs::SysKind::Entity {
+            continue;
+        }
+        let mut seen: HashSet<FuncId> = HashSet::new();
+        let mut todo: Vec<FuncId> = vec![s.func];
+        for &a in &s.archetypes {
+            todo.push(p.target_of(a, s.func));
+        }
+        while let Some(f) = todo.pop() {
+            if !seen.insert(f) {
+                continue;
+            }
+            crate::sema::visit_block(&p.funcs[f].body, &mut |e| {
+                if let ExprKind::Call { func, dispatch, .. } = &e.kind {
+                    match dispatch {
+                        Dispatch::Static | Dispatch::RemoteRead => todo.push(*func),
+                        Dispatch::SelfCall | Dispatch::BaseCall => {
+                            todo.push(*func);
+                            for &a in &s.archetypes {
+                                todo.push(p.target_of(a, *func));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        for f in seen {
+            let v = out.entry(f).or_default();
+            if !v.contains(&s.name) {
+                v.push(s.name.clone());
+            }
+        }
+    }
+    for v in out.values_mut() {
+        v.sort();
+    }
+    out
 }

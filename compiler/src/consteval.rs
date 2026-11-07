@@ -613,6 +613,8 @@ pub static CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 pub static FIELD_COUNTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// `sijoc build --gpu`: offload the pure self-write systems to a compute device (OpenMP target)
 pub static GPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `sijoc build --target wasm32`: the generated C carries its own C library (runtime/sijo_wasm.h)
+pub static WASM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn checked() -> bool {
     CHECKED.load(std::sync::atomic::Ordering::Relaxed)
 }

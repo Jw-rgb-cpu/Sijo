@@ -32,6 +32,50 @@ static void sijo_game_client_reset(SijoGame* g) {
     sijo_cli_init(&g->cl, &g->cs, 0);
 }
 
+#ifdef SIJO_WASM
+/* --target wasm32: a panic unwinds through a JS exception to the loader (see sijo_wasm.h), which
+ * restores the stack pointer and calls GAMEAPI_wasm_unwound: what the catch branch below does */
+static SijoGame* sijo_wasm_cur;
+static jmp_buf* sijo_wasm_oc;
+static SijoPanic* sijo_wasm_op;
+static int sijo_game_run(SijoGame* g, void (*fn)(SijoGame*)) {
+    if (g->failed) return 0;
+    static jmp_buf jb;
+    sijo_wasm_cur = g;
+    sijo_wasm_oc = sijo_tl_catch;
+    sijo_wasm_op = sijo_tl_panic;
+    g->busy = 1;
+    sijo_tl_panic = &g->S.panic;
+    sijo_tl_catch = &jb;
+    fn(g);
+    sijo_tl_catch = sijo_wasm_oc;
+    sijo_tl_panic = sijo_wasm_op;
+    g->busy = 0;
+    sijo_wasm_cur = NULL;
+    return 1;
+}
+/* the game whose API call a panic stopped: 0 from the call, GAMEAPI_error has the message */
+SIJO_API SijoGame* GAMEAPI_wasm_unwound(void) {
+    SijoGame* g = sijo_wasm_cur;
+    sijo_tl_catch = sijo_wasm_oc;
+    sijo_tl_panic = sijo_wasm_op;
+    sijo_tl_tid = 0;
+    if (g) {
+        g->busy = 0;
+        g->failed = 1;
+    }
+    sijo_wasm_cur = NULL;
+    return g;
+}
+SIJO_API void* GAMEAPI_wasm_alloc(int32_t n) { return malloc(n > 0 ? (size_t)n : 1); }
+SIJO_API void GAMEAPI_wasm_free(void* p) { free(p); }
+/* the draw list for JS, which cannot take a struct result */
+SIJO_API int32_t GAMEAPI_draw_sprite(const SijoGame* g, int32_t i) { return (g && i >= 0 && i < g->C.draws.n) ? g->C.draws.d[i].sprite : -1; }
+SIJO_API float GAMEAPI_draw_x(const SijoGame* g, int32_t i) { return (g && i >= 0 && i < g->C.draws.n) ? g->C.draws.d[i].x : 0; }
+SIJO_API float GAMEAPI_draw_y(const SijoGame* g, int32_t i) { return (g && i >= 0 && i < g->C.draws.n) ? g->C.draws.d[i].y : 0; }
+SIJO_API const char* GAMEAPI_draw_text(const SijoGame* g, int32_t i) { return (g && i >= 0 && i < g->C.draws.n && g->C.draws.d[i].tlen > 0) ? g->C.draws.text + g->C.draws.d[i].toff : NULL; }
+SIJO_API int32_t GAMEAPI_draw_text_len(const SijoGame* g, int32_t i) { return (g && i >= 0 && i < g->C.draws.n) ? g->C.draws.d[i].tlen : -1; }
+#else
 /* run game code; a panic in it (also on a worker thread of a parallel system) unwinds to here */
 static int sijo_game_run(SijoGame* g, void (*fn)(SijoGame*)) {
     if (g->failed) return 0;
@@ -54,6 +98,7 @@ static int sijo_game_run(SijoGame* g, void (*fn)(SijoGame*)) {
     g->failed = 1;
     return 0;
 }
+#endif
 
 static void sijo_game_do_start(SijoGame* g) {
     sijo_game_start(&g->S);

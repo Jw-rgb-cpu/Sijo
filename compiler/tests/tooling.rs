@@ -241,7 +241,7 @@ fn build(src: &str, tag: &str) -> Option<PathBuf> {
 fn build_with(src: &str, tag: &str, dev: bool) -> Option<PathBuf> {
     let cc = cc()?;
     let mut d = Diags::default();
-    let c = sijoc::driver::compile_with(src, &mut d, &sijoc::driver::Options { dev }).expect("compiles");
+    let c = sijoc::driver::compile_with(src, &mut d, &sijoc::driver::Options { dev, ..Default::default() }).expect("compiles");
     let dir = std::env::temp_dir().join(format!("sijoc-tooling-{}-{}", std::process::id(), tag));
     std::fs::create_dir_all(&dir).unwrap();
     let cfile = dir.join("p.c");

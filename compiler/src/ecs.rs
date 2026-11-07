@@ -111,6 +111,43 @@ pub fn plan_profiled(p: &Program, info: &EffectInfo, d: &mut crate::diag::Diags,
     plan_impl(p, info, d, keep_all, Some(live), prof)
 }
 
+/// The class whose method a system runs (its name in `order` lists)
+fn system_class(p: &Program, f: FuncId) -> Option<ClassId> {
+    match p.funcs[f].kind {
+        FuncKind::EntityMethod(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// Stable sort of the entity and client systems by (place in sijo.toml's `order`, [Order(n)] of the
+/// class, source order). An entry names a class (all its systems) or a system (`Mob.Think`); `*`
+/// is where the systems not listed go (after the listed ones when there is no `*`).
+fn order_systems(p: &Program, systems: &mut [SystemPlan]) {
+    let list = &p.system_order;
+    let star = list.iter().position(|x| x == "*").unwrap_or(list.len());
+    let key = |s: &SystemPlan| {
+        let class = system_class(p, s.func).map(|c| p.classes[c].name.clone()).unwrap_or_default();
+        let rank = list.iter().position(|x| *x == s.name || *x == class).unwrap_or(star);
+        let attr = system_class(p, s.func).map(|c| p.classes[c].run_order).unwrap_or(0);
+        (rank, attr)
+    };
+    let mut keyed: Vec<((usize, i64), usize, SystemPlan)> = systems.iter().enumerate().map(|(i, s)| (key(s), i, s.clone())).collect();
+    keyed.sort_by_key(|(k, i, _)| (*k, *i));
+    for (dst, (_, _, s)) in systems.iter_mut().zip(keyed) {
+        *dst = s;
+    }
+}
+
+/// Entries of sijo.toml's `order` that name no entity class with systems and no system.
+pub fn unknown_order_entries(p: &Program, plan: &EcsPlan) -> Vec<String> {
+    p.system_order
+        .iter()
+        .filter(|x| *x != "*")
+        .filter(|x| !plan.systems.iter().any(|s| s.name == **x || system_class(p, s.func).map(|c| p.classes[c].name == **x).unwrap_or(false)))
+        .cloned()
+        .collect()
+}
+
 /// entity rows from which a system's loop runs in parallel, without a profile
 pub const DEFAULT_PAR_MIN: usize = 256;
 
@@ -169,6 +206,9 @@ fn plan_impl(p: &Program, info: &EffectInfo, d: &mut crate::diag::Diags, keep_al
             systems.push(mk(format!("{}.{}", p.classes[c].name, mname), kind, f, archs, eff));
         }
     }
+    // ---- 1b. the order the entity systems run in: sijo.toml's `order`, then [Order(n)] on the
+    // class, then source order (declaration order; file path order in a project)
+    order_systems(p, &mut systems);
     if let Some(g) = p.game {
         if let Some(f) = p.game_update {
             systems.push(mk("Game.Update".into(), SysKind::Global, f, vec![], info.get(f, None)));
@@ -421,7 +461,9 @@ fn plan_impl(p: &Program, info: &EffectInfo, d: &mut crate::diag::Diags, keep_al
                 s.structural.insert(Res::Comp(a, k));
             }
         }
-        if e.prints {
+        // queued host calls are made at the end of the stage: a system that prints or calls the host
+        // directly must not share the stage, or its output would come before theirs
+        if e.prints || !e.host_queue.is_empty() {
             s.writes.insert(Res::Stdout);
         }
         if s.kind == SysKind::Entity {
@@ -447,7 +489,17 @@ fn plan_impl(p: &Program, info: &EffectInfo, d: &mut crate::diag::Diags, keep_al
                     s.why_serial.push("spawns entities and uses the returned handle beyond storing it in a field of this, comparing it or sending to it (or spawns inside atomic): ids are assigned in order".into());
                 }
             }
-            if e.prints {
+            if e.print_stmt {
+                s.why_serial.push("prints (output order)".into());
+            }
+            if !e.externs.is_empty() {
+                let names: Vec<String> = e.externs.iter().map(|f| p.func_label(*f)).collect();
+                s.why_serial.push(format!(
+                    "calls host function(s) {} (extern: what they do outside the world happens in call order; [Deferred] on a void extern queues the calls and keeps the system parallel)",
+                    names.join(", ")
+                ));
+            }
+            if e.prints && s.why_serial.is_empty() {
                 s.why_serial.push("prints (output order)".into());
             }
             s.parallel = s.why_serial.is_empty();
@@ -1096,7 +1148,9 @@ pub fn gpu_candidate(p: &Program, plan: &EcsPlan, i: usize) -> Result<(usize, us
     if s.kind != SysKind::Entity {
         return Err("not an entity system".into());
     }
-    let why = if e.prints {
+    let why = if !e.externs.is_empty() || !e.host_queue.is_empty() {
+        "calls host functions"
+    } else if e.prints {
         "prints"
     } else if e.random {
         "draws random numbers"

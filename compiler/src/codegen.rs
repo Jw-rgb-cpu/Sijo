@@ -27,6 +27,10 @@ const GRID_RUNTIME: &str = include_str!("../runtime/sijo_grid.h");
 const NET_RUNTIME: &str = include_str!("../runtime/sijo_net.h");
 const CRYPTO_RUNTIME: &str = include_str!("../runtime/sijo_crypto.h");
 const EMBED_RUNTIME: &str = include_str!("../runtime/sijo_embed.c.h");
+const WASM_RUNTIME: &str = include_str!("../runtime/sijo_wasm.h");
+
+#[path = "codegen_grid.rs"]
+mod grid_gen;
 /// the shard runtime: types and helpers (before the generated code) | world logic (after it)
 const SHARD_RUNTIME: &str = include_str!("../runtime/sijo_shard.h");
 const SHARD_NET_RUNTIME: &str = include_str!("../runtime/sijo_shard_net.h");
@@ -38,15 +42,47 @@ pub const DEFAULT_LIB_PREFIX: &str = "sijo_game";
 
 /// The public header of a `--lib` build: the embedding API (functions named `<prefix>_create`...)
 /// and the prototypes of the host functions the game calls (extern).
+/// What the wasm loader needs to know about the C API of a game (see src/wasm.rs)
+pub struct WasmMeta {
+    /// (C name, Sijo name, parameter kinds, return C type) of every host function
+    pub externs: Vec<(String, String, Vec<String>, String)>,
+    /// (C name, kind, what) of every field accessor
+    pub accessors: Vec<(String, String, String)>,
+}
+
+pub fn wasm_meta(c: &Compiled, prefix: &str) -> WasmMeta {
+    let mut g = Gen::new(c);
+    g.prefix = prefix.to_string();
+    let (_, _, accessors) = g.host_accessors_js();
+    WasmMeta { externs: g.extern_sigs(), accessors }
+}
+
 pub fn embed_header(c: &Compiled, prefix: &str) -> String {
     let mut h = EMBED_HEADER
         .replace("GAMEAPI_HDR", &format!("{}.h", prefix))
         .replace("GAMEAPI_GUARD", &format!("{}_H", prefix.to_ascii_uppercase()))
         .replace("GAMEAPI_", &format!("{}_", prefix));
+    let g = Gen::new(c);
+    let (protos, _) = { let mut g = Gen::new(c); g.prefix = prefix.to_string(); g.host_accessors() };
+    if !protos.is_empty() {
+        h.push_str("\n/* read-only access to entity fields of the server world (public fields of entity classes).\n * i runs over the live entities of the class (subclasses included) in table order, 0..count-1;\n * values and pointers are valid until the next step, load or destroy. A bad index gives 0\n * (pointers: NULL with *len = -1). */\n");
+        h.push_str(&protos);
+    }
     h.push_str("\n/* host functions the game calls (extern in Sijo): define them in the host program */\n");
-    h.push_str(&Gen::new(c).extern_decls());
+    h.push_str(&g.extern_decls());
     h.push_str("\n#ifdef __cplusplus\n}\n#endif\n#endif\n");
     h
+}
+
+/// Can the host read a field of this type through a generated accessor? Numbers, bools, chars,
+/// enums, strings, handles, structs of those, and arrays or lists of numbers.
+pub fn host_readable(p: &Program, t: &Ty) -> bool {
+    match t {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Enum(_) | Ty::Str | Ty::Handle(_) | Ty::NHandle(_) => true,
+        Ty::Struct(s) => p.structs[*s].fields.iter().all(|m| host_readable(p, &m.ty) && !m.ty.is_list()),
+        Ty::Array(e) | Ty::List(e) => matches!(**e, Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Enum(_)),
+        _ => false,
+    }
 }
 
 /// warnings that generated code triggers by design (unused helpers, GNU statement expressions...),
@@ -235,6 +271,13 @@ struct FCtx {
     copied: BTreeSet<(usize, usize)>,
     /// the code is shared by the tables of this group: `this` is reached through the view `V`
     shared: Option<usize>,
+    /// lists of other entities (handle local, field, C variable) read once before a counting loop
+    /// that cannot change them: the C compiler cannot keep them in registers itself across a call
+    /// it cannot see into (an extern), and a handle costs a lookup per read
+    lists: Vec<(LocalId, FieldId, String)>,
+    /// inside the lambda of a grid operation: Random draws are keyed by (the operation's key, the
+    /// cell's index, the draw's number in the cell) — C names of the three
+    cell_rng: Option<(String, String, String)>,
 }
 
 /// An atomic block being generated: its number (C names `afail{n}`, `as{n}_{k}`...) and the
@@ -738,6 +781,28 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// is the default value of `t` all zero bytes? (then a zeroed allocation is already filled)
+    fn zero_default(&self, t: &Ty) -> bool {
+        fn zero(v: &ConstVal) -> bool {
+            match v {
+                ConstVal::Int(n) => *n == 0,
+                ConstVal::Float(f) => *f == 0.0 && f.is_sign_positive(),
+                ConstVal::Bool(b) => !*b,
+                ConstVal::Enum(_, x) => *x == 0,
+                ConstVal::Null => true,
+                ConstVal::Struct(_, vals) => vals.iter().all(zero),
+                ConstVal::Fn(_, n) => *n == 0,
+                ConstVal::Str(_) => false,
+            }
+        }
+        match t {
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Enum(_) | Ty::NHandle(_) | Ty::Handle(_) => true,
+            Ty::List(_) | Ty::Dict(..) | Ty::Array(_) | Ty::MdArray(..) | Ty::Delegate(_) => true,
+            Ty::Struct(s) => consteval::struct_default(self.p, *s).map(|v| zero(&v)).unwrap_or(false),
+            _ => false,
+        }
+    }
+
     fn field_default(&self, f: FieldId) -> String {
         let fd = &self.p.fields[f];
         if let (Ty::Array(el), Some(Expr { kind: ExprKind::ArrayNew { len, elems, .. }, .. })) = (&fd.ty, &fd.init) {
@@ -750,11 +815,17 @@ impl<'a> Gen<'a> {
                 },
                 None => elems.len(),
             };
-            let vals: Vec<String> = if len.is_some() {
-                vec![self.default_of(el); n]
-            } else {
-                elems.iter().map(|x| consteval::eval_expr(self.p, x).map(|v| self.cval(&v)).unwrap_or_else(|_| self.default_of(el))).collect()
-            };
+            if len.is_some() {
+                // new T[n]: one zeroed allocation, and one loop when the element's default is not zero
+                // (never a statement per element: `new int[90000]` stays one line of C)
+                let fill = if self.zero_default(el) {
+                    String::new()
+                } else {
+                    format!("{{ {et} d_ = {}; for (int32_t i_ = 0; i_ < L_.len; i_++) (({et}*)L_.data)[i_] = d_; }} ", self.default_of(el))
+                };
+                return format!("({{ SijoList L_ = sijo_array_new(NULL, 1, (int32_t)sizeof({et}), {n}); {fill}L_; }})");
+            }
+            let vals: Vec<String> = elems.iter().map(|x| consteval::eval_expr(self.p, x).map(|v| self.cval(&v)).unwrap_or_else(|_| self.default_of(el))).collect();
             let fills: String = vals.iter().enumerate().map(|(i, v)| format!("(({et}*)L_.data)[{i}] = {v}; ")).collect();
             return format!("({{ SijoList L_ = sijo_list_new(NULL, 1, (int32_t)sizeof({et}), {n}); L_.len = {n}; {fills}L_; }})");
         }
@@ -769,7 +840,7 @@ impl<'a> Gen<'a> {
                 })
                 .collect();
             ds.resize(3, 1);
-            let zero = matches!(**el, Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Enum(_) | Ty::NHandle(_) | Ty::Handle(_));
+            let zero = self.zero_default(el);
             let fills: String = if !elems.is_empty() {
                 let vals = elems.iter().map(|x| consteval::eval_expr(self.p, x).map(|v| self.cval(&v)).unwrap_or_else(|_| self.default_of(el)));
                 vals.enumerate().map(|(i, v)| format!("(({et}*)L_.data)[{i}] = {v}; ")).collect()
@@ -811,7 +882,12 @@ impl<'a> Gen<'a> {
         if self.checked {
             self.w("#define SIJO_CHECKED 1 /* sijoc build --checked: integer overflow traps */\n");
         }
-        self.w("/* Build: gcc -std=gnu11 -O2 -ffp-contract=off -fopenmp prog.c -lm  (or clang; see runtime notes below) */\n");
+        if crate::consteval::WASM.load(std::sync::atomic::Ordering::Relaxed) {
+            self.w("/* Build (sijoc build --target wasm32 runs this): clang --target=wasm32 -std=gnu11 -O2 -ffp-contract=off -nostdlib -mbulk-memory -mnontrapping-fptoint -Wl,--no-entry -Wl,--export-dynamic -Wl,--allow-undefined -Wl,--export=__stack_pointer prog.c -o prog.wasm */\n#define SIJO_WASM 1\n");
+            self.w(WASM_RUNTIME);
+        } else {
+            self.w("/* Build: gcc -std=gnu11 -O2 -ffp-contract=off -fopenmp prog.c -lm  (or clang; see runtime notes below) */\n");
+        }
         self.w(RUNTIME);
         self.w(&crate::uchar::c_tables());
         self.w(STR_RUNTIME);
@@ -1015,14 +1091,18 @@ static void sijo_send_set(SijoWorld* w, SijoH h, uint16_t field, uint16_t off, c
   SijoCmd* c = sijo_cmd_push(b);
   c->kind = SIJO_CMD_SET; c->target = h; c->src = w->tls[t].cur; c->field = field; c->off = off; c->size = size; c->data = d;
 }
+/* = sijo_rng_key(w->seed, w->tick, rng_ent, site, ctr), with the entity's part mixed once */
+static inline uint64_t sijo_rng_next(SijoWorld* w, uint32_t site) {
+  SijoTls* tl = &w->tls[sijo_tid()];
+  if (__builtin_expect(!tl->rng_ok, 0)) { tl->rng_base = sijo_mix(sijo_mix(w->seed ^ (uint64_t)(uint32_t)w->tick) ^ tl->rng_ent); tl->rng_ok = 1; }
+  return sijo_mix(tl->rng_base ^ (((uint64_t)site << 32) | tl->rng_ctr++));
+}
 static inline float sijo_randf(SijoWorld* w, uint32_t site, float lo, float hi) {
-  int t = sijo_tid();
-  uint64_t k = sijo_rng_key(w->seed, w->tick, w->tls[t].rng_ent, site, w->tls[t].rng_ctr++);
+  uint64_t k = sijo_rng_next(w, site);
   return lo + (hi - lo) * sijo_rand01(k);
 }
 static inline int32_t sijo_randi(SijoWorld* w, uint32_t site, int32_t lo, int32_t hi) {
-  int t = sijo_tid();
-  uint64_t k = sijo_rng_key(w->seed, w->tick, w->tls[t].rng_ent, site, w->tls[t].rng_ctr++);
+  uint64_t k = sijo_rng_next(w, site);
   if (hi <= lo) return lo;
   return (int32_t)((int64_t)lo + (int64_t)(k % (uint64_t)((int64_t)hi - (int64_t)lo)));
 }
@@ -1469,7 +1549,14 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
     /// keep it out of line, a call per entity. Inlined into both, the loop over all rows is as fast
     /// as with one loop. Not for shared code (one copy for several tables by design) or [Recursive].
     fn inline_in_rows(&self, f: FuncId, a: ClassId) -> bool {
-        !self.p.funcs[f].recursive_attr
+        // a grid Step or Move catches panics of its threads with setjmp, which cannot be inlined
+        let mut grid = false;
+        crate::sema::visit_block(&self.p.funcs[f].body, &mut |e| {
+            if let ExprKind::ListLambda { op: LamOp::GridStep | LamOp::GridMove, .. } = &e.kind {
+                grid = true;
+            }
+        });
+        !grid && !self.p.funcs[f].recursive_attr
             && self.share.get(&(f, a)).is_none()
             && self.c.ecs.systems.iter().enumerate().any(|(i, s)| {
                 s.func == f && s.kind == SysKind::Entity && self.shard.mode[i] == crate::shard::Mode::Part && s.archetypes.contains(&a)
@@ -1534,6 +1621,153 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
     }
 
     /// C declarations of the host functions (extern) the program calls
+    /// `int[K.N] F = v`: the array assigned must have the declared length (C code before the store)
+    fn fixed_len_check(&self, f: FieldId, v: &str) -> String {
+        match self.p.fields[f].fixed_len {
+            Some(n) => format!("if (({v}).len != {n}) sijo_panic({}); ", c_str(&format!("'{}' is declared with {} elements: the array assigned to it has another length", self.p.field_label(f), n))),
+            None => String::new(),
+        }
+    }
+
+    /// The embedding API's read-only field accessors: (header prototypes, C definitions). Per entity
+    /// class with public fields: `<prefix>_<Class>_count(g)`, `<prefix>_<Class>_id(g, i)` and one
+    /// function per readable leaf (`<prefix>_Ship_Pos_X(g, i)`; arrays, lists and strings give a
+    /// pointer and set *len).
+    fn host_accessors(&self) -> (String, String) {
+        let (a, b, _) = self.host_accessors_js();
+        (a, b)
+    }
+
+    /// host_accessors plus, for the wasm loader, each function's C name and what it returns:
+    /// "count", "id", "handle", "str", "ptr:<C element type>" or the C type of a value
+    pub(crate) fn host_accessors_js(&self) -> (String, String, Vec<(String, String, String)>) {
+        let mut js: Vec<(String, String, String)> = vec![];
+        let p = self.p;
+        let pf = &self.prefix;
+        let (mut protos, mut defs) = (String::new(), String::new());
+        let fixed = ["create", "step", "error", "tick", "draw_count", "draw", "checksum", "save", "load", "set_threads", "set_panic_hook", "main", "destroy"];
+        let mut used: BTreeSet<String> = fixed.iter().map(|x| format!("{pf}_{x}")).collect();
+        let mut unique = |want: String| -> String {
+            let mut n = want.clone();
+            let mut k = 2;
+            while used.contains(&n) {
+                n = format!("{want}_{k}");
+                k += 1;
+            }
+            used.insert(n.clone());
+            n
+        };
+        for c in 0..p.classes.len() {
+            let cl = &p.classes[c];
+            if !cl.is_entity || cl.is_interface || cl.is_component || cl.combo_of.is_some() || Some(c) == p.entity_root {
+                continue;
+            }
+            let archs = p.archetypes_of(c);
+            if archs.is_empty() {
+                continue;
+            }
+            let fields: Vec<FieldId> = (0..p.fields.len())
+                .filter(|&f| {
+                    let fd = &p.fields[f];
+                    fd.attrs.public && p.is_subclass(c, fd.class) && !p.classes[fd.class].is_component && !self.c.ecs.is_dead(f) && host_readable(p, &fd.ty) && !fd.name.starts_with("__")
+                })
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let cn = &self.cnames[c];
+            let at = format!("sijo_api_at_{cn}");
+            // the archetype (0..) and row of entity i of the class
+            let mut body = format!("static int {at}(const SijoWorld* w, int32_t* i) {{\n  if (*i < 0) return -1;\n");
+            for (k, &a) in archs.iter().enumerate() {
+                let _ = write!(body, "  if (*i < w->{an}.count) return {k}; *i -= w->{an}.count;\n", an = self.aname(a));
+            }
+            body.push_str("  return -1;\n}\n");
+            defs.push_str(&body);
+            let count = unique(format!("{pf}_{cn}_count"));
+            let sum: Vec<String> = archs.iter().map(|&a| format!("w->{}.count", self.aname(a))).collect();
+            let _ = writeln!(protos, "SIJO_API int32_t {count}(const SijoGame* g);");
+            js.push((count.clone(), "count".into(), format!("{}", cl.name)));
+            let _ = writeln!(defs, "SIJO_API int32_t {count}(const SijoGame* g) {{ if (!g) return 0; const SijoWorld* w = &g->S; return {}; }}", sum.join(" + "));
+            let id = unique(format!("{pf}_{cn}_id"));
+            let _ = writeln!(protos, "SIJO_API uint64_t {id}(const SijoGame* g, int32_t i); /* (generation << 32) | slot, 0: none */");
+            js.push((id.clone(), "id".into(), format!("{}", cl.name)));
+            let mut cases = String::new();
+            for (k, &a) in archs.iter().enumerate() {
+                let _ = write!(cases, " case {k}: {{ SijoH h = w->{}.ent[i]; return ((uint64_t)h.gen << 32) | h.idx; }}", self.aname(a));
+            }
+            let _ = writeln!(defs, "SIJO_API uint64_t {id}(const SijoGame* g, int32_t i) {{ if (!g) return 0; const SijoWorld* w = &g->S; switch ({at}(w, &i)) {{{cases} }} return 0; }}");
+            for &f in &fields {
+                let fd = &p.fields[f];
+                // the leaves of the field: (name suffix, member path, type)
+                let mut leaves: Vec<(String, String, Ty)> = vec![];
+                fn walk(p: &Program, t: &Ty, name: String, path: String, out: &mut Vec<(String, String, Ty)>) {
+                    match t {
+                        Ty::Struct(s) => {
+                            for m in &p.structs[*s].fields {
+                                walk(p, &m.ty, format!("{}_{}", name, cid(&m.name)), format!("{}.{}", path, cid(&m.name)), out);
+                            }
+                        }
+                        _ => out.push((name, path, t.clone())),
+                    }
+                }
+                walk(p, &fd.ty, cid(&fd.name), String::new(), &mut leaves);
+                for (suffix, path, t) in leaves {
+                    let fname = unique(format!("{pf}_{cn}_{suffix}"));
+                    let place = |a: ClassId| format!("w->{}.c{}[i].{}{}", self.aname(a), self.comp(f), self.fname(f), path);
+                    let (ret, sig, zero, val): (String, String, String, Box<dyn Fn(&str) -> String>) = match &t {
+                        Ty::Str => ("const char*".into(), "const SijoGame* g, int32_t i, int32_t* len".into(), "if (len) *len = -1; return NULL;".into(), Box::new(|pl: &str| format!("{{ SijoStr s_ = {pl}; if (len) *len = s_.n; return s_.p; }}"))),
+                        Ty::Array(el) | Ty::List(el) => {
+                            let et = self.cty(el);
+                            (format!("const {et}*"), "const SijoGame* g, int32_t i, int32_t* len".into(), "if (len) *len = -1; return NULL;".into(), Box::new(move |pl: &str| format!("{{ SijoList l_ = {pl}; if (len) *len = l_.len; return (const {et}*)l_.data; }}")))
+                        }
+                        Ty::Handle(_) | Ty::NHandle(_) => ("uint64_t".into(), "const SijoGame* g, int32_t i".into(), "return 0;".into(), Box::new(|pl: &str| format!("{{ SijoH h_ = {pl}; return ((uint64_t)h_.gen << 32) | h_.idx; }}"))),
+                        other => {
+                            let ct = if *other == Ty::Bool { "bool".to_string() } else { self.cty(other) };
+                            (ct.clone(), "const SijoGame* g, int32_t i".into(), format!("return ({ct})0;"), Box::new(|pl: &str| format!("return {pl};")))
+                        }
+                    };
+                    let what = format!("{}.{}{}", cl.name, fd.name, path.replace('.', "."));
+                    let _ = writeln!(protos, "SIJO_API {ret} {fname}({sig}); /* {what} */");
+                    let kind = match &t {
+                        Ty::Str => "str".to_string(),
+                        Ty::Array(el) | Ty::List(el) => format!("ptr:{}", if **el == Ty::Bool { "bool".to_string() } else { self.cty(el) }),
+                        Ty::Handle(_) | Ty::NHandle(_) => "handle".into(),
+                        other => if *other == Ty::Bool { "bool".into() } else { self.cty(other) },
+                    };
+                    js.push((fname.clone(), kind, what.clone()));
+                    let mut cases = String::new();
+                    for (k, &a) in archs.iter().enumerate() {
+                        let _ = write!(cases, " case {k}: {}", val(&place(a)));
+                    }
+                    let _ = writeln!(defs, "SIJO_API {ret} {fname}({sig}) {{ if (!g) {{ {zero} }} const SijoWorld* w = &g->S; switch ({at}(w, &i)) {{{cases} }} {zero} }}");
+                }
+            }
+        }
+        (protos, defs, js)
+    }
+
+    /// the host functions for the wasm loader: (C name, Sijo name, parameter kinds, return C type)
+    pub(crate) fn extern_sigs(&self) -> Vec<(String, String, Vec<String>, String)> {
+        let mut v = vec![];
+        for (fid, f) in self.p.funcs.iter().enumerate() {
+            let Some(name) = &f.extern_name else { continue };
+            let ps: Vec<String> = f
+                .params
+                .iter()
+                .map(|&l| match &f.locals[l].ty {
+                    Ty::Str => "str".to_string(),
+                    Ty::Array(el) | Ty::List(el) => format!("ptr:{}", if **el == Ty::Bool { "bool".to_string() } else { self.cty(el) }),
+                    Ty::Bool => "bool".into(),
+                    t => self.cty(t),
+                })
+                .collect();
+            let ret = if f.ret == Ty::Bool { "bool".to_string() } else { self.cty(&f.ret) };
+            v.push((name.clone(), self.p.func_label(fid), ps, ret));
+        }
+        v
+    }
+
     fn extern_decls(&self) -> String {
         let mut o = String::new();
         for f in &self.p.funcs {
@@ -1543,6 +1777,10 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                     let loc = &f.locals[l];
                     if loc.ty == Ty::Str {
                         ps.push(format!("const char* {}", cid(&loc.name)));
+                        ps.push(format!("int32_t {}_len", cid(&loc.name)));
+                    } else if let Ty::Array(el) | Ty::List(el) = &loc.ty {
+                        // lent for the call: read-only, valid until the function returns
+                        ps.push(format!("const {}* {}", self.cty(el), cid(&loc.name)));
                         ps.push(format!("int32_t {}_len", cid(&loc.name)));
                     } else {
                         ps.push(format!("{} {}", self.cty(&loc.ty), cid(&loc.name)));
@@ -1568,6 +1806,14 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
         self.w("\n/* host functions (extern): defined by the program that embeds the game */\n");
         let decls = self.extern_decls();
         self.w(&decls);
+        for (k, f) in self.host_queue_funcs().into_iter().enumerate() {
+            let func = &self.p.funcs[f];
+            let mut ps = vec!["SijoWorld* w".to_string()];
+            for &l in &func.params {
+                ps.push(format!("{} a{l}", self.cty(&func.locals[l].ty)));
+            }
+            let _ = writeln!(self.out, "static void sijo_qhost{k}({});", ps.join(", "));
+        }
         self.w("\n/* prototypes */\n");
         for (f, a, view) in self.instances() {
             let s = self.sig(f, a, view);
@@ -2294,7 +2540,7 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
         if let FuncKind::StructCtor(s) = func.kind {
             let _ = writeln!(self.out, "  {sn} self_v = {}; {sn}* self = &self_v;", self.default_of(&Ty::Struct(s)), sn = self.sname(s));
         }
-        let mut cx = FCtx { fid: f, arch, view, cursors: HashMap::new(), break_labels: vec![], atomic_fail: None, co_state: None, hoisted: HashMap::new(), cache: BTreeSet::new(), writeback: String::new(), rewind_first: String::new(), rush_bg: None, rush: vec![], atomics: vec![], jumps: vec![], copied: BTreeSet::new(), shared: arch.and_then(|a| self.share.get(&(f, a)).copied()) };
+        let mut cx = FCtx { fid: f, arch, view, cursors: HashMap::new(), break_labels: vec![], atomic_fail: None, co_state: None, hoisted: HashMap::new(), cache: BTreeSet::new(), writeback: String::new(), rewind_first: String::new(), rush_bg: None, rush: vec![], atomics: vec![], jumps: vec![], copied: BTreeSet::new(), shared: arch.and_then(|a| self.share.get(&(f, a)).copied()), lists: vec![], cell_rng: None };
         // the row of `this` in locals: one load per field on entry, one store per written field on
         // exit (lets the C compiler keep fields in registers and vectorize self-only updates)
         let cache = self.row_cache_fields(f, arch, view);
@@ -2380,14 +2626,53 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
         let mut o = String::new();
         // what a statement of this block makes sure of holds for the rest of it, not after it
         let copied = cx.copied.clone();
-        for s in &b.stmts {
+        for (k, s) in b.stmts.iter().enumerate() {
             if let Some(d) = self.line_directive(s) {
                 o.push_str(&d);
             }
-            o.push_str(&self.stmt(s, cx, ind));
+            let prev = if k > 0 { Some(&b.stmts[k - 1]) } else { None };
+            // a loop that drops the checks of a fixed-length array field because it counts to a
+            // constant no larger than the declared length: the length is verified once before it,
+            // so even a state from elsewhere (a file, the network) cannot make it read out of range
+            if let (Some(pv), Stmt::Loop { cond, step, body, do_while }) = (prev, s) {
+                if let Some((_, l, _, Some(n))) = crate::opt::counting_loop_fixed(self.p, pv, cond, step, *do_while, body) {
+                    let lc = self.expr(l, cx);
+                    let what = match &l.kind {
+                        ExprKind::EField { field, .. } => self.p.field_label(*field),
+                        _ => "array".into(),
+                    };
+                    let _ = writeln!(o, "{}if (({lc}).len != {n}) sijo_panic({});", Self::ind(ind), c_str(&format!("'{}' does not have its declared {} elements (a corrupt state or message)", what, n)));
+                }
+            }
+            match self.hoisted_list_loop(s, prev, cx, ind) {
+                Some(code) => o.push_str(&code),
+                None => o.push_str(&self.stmt(s, cx, ind)),
+            }
         }
         cx.copied = copied;
         o
+    }
+
+    /// `for (i = 0; i < h.F.Length; i++)` over another entity's list that the body cannot change
+    /// (opt::counting_loop): h.F is read once into a C local before the loop (the condition reads it
+    /// before the first iteration anyway), so a handle is looked up once and an extern call in the
+    /// body does not make the C compiler reload the list's data pointer and length every iteration.
+    fn hoisted_list_loop(&mut self, s: &Stmt, prev: Option<&Stmt>, cx: &mut FCtx, ind: usize) -> Option<String> {
+        let Stmt::Loop { cond, step, body, do_while } = s else { return None };
+        let (_, l, _, _) = crate::opt::counting_loop_fixed(self.p, prev?, cond, step, *do_while, body)?;
+        let ExprKind::EField { base, field } = &l.kind else { return None };
+        let ExprKind::Local(h) = base.kind else { return None };
+        if cx.lists.iter().any(|(x, f, _)| *x == h && f == field) || self.c.ecs.is_dead(*field) {
+            return None;
+        }
+        let lc = self.expr(l, cx);
+        self.tmp += 1;
+        let v = format!("hl{}", self.tmp);
+        cx.lists.push((h, *field, v.clone()));
+        let inner = self.stmt(s, cx, ind + 1);
+        cx.lists.pop();
+        let i = Self::ind(ind);
+        Some(format!("{i}{{\n{i}  SijoList {v} = {lc};\n{inner}{i}}}\n"))
     }
 
     /// `#line N "file.sijo"` before a statement whose source line differs from the previous one
@@ -3140,7 +3425,15 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                 let b = self.expr(base, cx);
                 format!("({}).{}", b, cid(&self.p.structs[*sid].fields[*idx].name))
             }
-            ExprKind::EField { base, field } => self.efield_read(base, *field, cx),
+            ExprKind::EField { base, field } => {
+                // another entity's list read once before a counting loop over it (see Stmt::Loop)
+                if let ExprKind::Local(h) = base.kind {
+                    if let Some((_, _, v)) = cx.lists.iter().find(|(x, f, _)| *x == h && f == field) {
+                        return v.clone();
+                    }
+                }
+                self.efield_read(base, *field, cx)
+            }
             ExprKind::Unary(op, x) => {
                 let v = self.expr(x, cx);
                 match op {
@@ -3301,7 +3594,12 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                 };
                 format!("({{ SijoH {t} = {h}; bool _ok{t} = {test}; {bindc}_ok{t}; }})")
             }
-            ExprKind::ListLambda { list, op, params, body, site } => self.lambda_op(e, list, *op, params, body, *site, cx),
+            ExprKind::ListLambda { list, op, params, body, site, args } => {
+                if op.is_grid() {
+                    return self.grid_lambda(e, list, *op, params, body, args, cx);
+                }
+                self.lambda_op(e, list, *op, params, body, *site, cx)
+            }
             ExprKind::ArrayNew { site, len, elems, dims } => {
                 let el = self.elem_cty(&self.p.alloc_sites[*site].elem);
                 let ety = self.p.alloc_sites[*site].elem.clone();
@@ -3507,6 +3805,7 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
         };
         let rt = self.cty(&e.ty);
         match op {
+            LamOp::GridStep | LamOp::GridMove | LamOp::GridRay => unreachable!("grid operations: grid_lambda"),
             LamOp::Exists => format!("({{ SijoList {t}l = {lv}; bool {t}r = false; {} {t}r; }})", each(false, &format!("if ({b}) {{ {t}r = true; break; }}"))),
             LamOp::All => format!("({{ SijoList {t}l = {lv}; bool {t}r = true; {} {t}r; }})", each(false, &format!("if (!({b})) {{ {t}r = false; break; }}"))),
             LamOp::Count => format!("({{ SijoList {t}l = {lv}; int32_t {t}r = 0; {} {t}r; }})", each(false, &format!("if ({b}) {t}r++;"))),
@@ -4348,7 +4647,8 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
             let src = self.list_src(value, cx);
             let t = self.t();
             let fr = self.free_code(&target.ty, &sub, 0);
-            return format!("({{ SijoList {t} = {src}; {fr} {sub} = {t}; }})");
+            let chk = if path.is_empty() { self.fixed_len_check(field, &t) } else { String::new() };
+            return format!("({{ SijoList {t} = {src}; {chk}{fr} {sub} = {t}; }})");
         }
         let v = self.expr(value, cx);
         let assign = match op {
@@ -4407,7 +4707,8 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                     }
                 };
                 let t = self.t();
-                format!("({{ SijoH {ht} = {h}; {tty} {t} = {nv}; sijo_send_set(w, {ht}, {fid}, {off}, &{t}, (uint16_t)sizeof({t})); }})")
+                let chk = if path.is_empty() && target.ty.is_list() { self.fixed_len_check(field, &t) } else { String::new() };
+                format!("({{ SijoH {ht} = {h}; {tty} {t} = {nv}; {chk}sijo_send_set(w, {ht}, {fid}, {off}, &{t}, (uint16_t)sizeof({t})); }})")
             }
         }
     }
@@ -4491,8 +4792,10 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
             let ret_range = callee.ret_range;
             let mut pre = String::new();
             let mut cargs = vec![];
+            let mut qnames: Vec<String> = vec![];
             for (i, (x, v)) in items.into_iter().enumerate() {
                 let t = self.t();
+                qnames.push(t.clone());
                 let v = match ranges.get(i).copied().flatten() {
                     Some((lo, hi)) => self.saturate_code(&x.ty, &v, lo, hi),
                     None => v,
@@ -4501,6 +4804,9 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                 if x.ty == Ty::Str {
                     cargs.push(format!("{t}.p"));
                     cargs.push(format!("{t}.n"));
+                } else if let Ty::Array(el) | Ty::List(el) = &x.ty {
+                    cargs.push(format!("(const {}*){t}.data", self.cty(el)));
+                    cargs.push(format!("{t}.len"));
                 } else {
                     cargs.push(t);
                 }
@@ -4510,6 +4816,14 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                 Some((lo, hi)) => self.saturate_code(&e.ty.clone(), &call, lo, hi),
                 None => call,
             };
+            if callee.deferred_attr {
+                // [Deferred]: on the server the call is queued with copies of its arguments and made
+                // in command order at the end of the stage (sijo_exec_host); a client makes it now
+                let k = self.host_queue_index(f);
+                let mut q = vec!["w".to_string()];
+                q.extend((0..args.len()).map(|i| qnames[i].clone()));
+                return Self::wrap(pre, format!("(w->is_client ? (void)({call}) : sijo_qhost{k}({}))", q.join(", ")));
+            }
             return Self::wrap(pre, call);
         }
         // arguments
@@ -4754,6 +5068,19 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                 let t = self.t();
                 format!("({{ SijoList* {t}l = &{}; {et} {t}v = {v}; for (int32_t {t}i = 0; {t}i < {t}l->len; {t}i++) (({et}*){t}l->data)[{t}i] = {t}v; }})", paren(&l))
             }
+            ListOp::GridFlood => {
+                // the coordinates (and z = 0 for a 2D grid), then the value, in C# order
+                let rank = list.ty.rank();
+                let t = self.t();
+                let mut o = String::new();
+                for (d, a) in args[..rank].iter().enumerate() {
+                    let v = self.expr(a, cx);
+                    let _ = write!(o, "int32_t {t}c{d} = {v}; ");
+                }
+                let v = self.expr(&args[rank], cx);
+                let z = if rank == 3 { format!("{t}c2") } else { "0".into() };
+                format!("({{ {o}{et} {t}v = {v}; SIJO_AT(sijo_grid_flood(&{}, {rank}, {t}c0, {t}c1, {z}, &{t}v, (int32_t)sizeof({et}))); }})", paren(&l))
+            }
             ListOp::Sort => {
                 let cmp = match &el {
                     Ty::Float => "sijo_cmp_f32",
@@ -4913,8 +5240,35 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
                 let t = self.t();
                 format!("({{ SijoStr {t} = {}; sijo_draw_text(&w->draws, {}, {}, {t}.p, {t}.n); }})", a[2], a[0], a[1])
             }
+            Builtin::RandomFloat if cx.cell_rng.is_some() => {
+                let (k, i, c) = cx.cell_rng.clone().unwrap();
+                format!("sijo_cell_randf({k}, {}u, {i}, {c}++, {}, {})", self.rng_keys.get(&site).copied().unwrap_or(site as u32), a[0], a[1])
+            }
+            Builtin::RandomInt if cx.cell_rng.is_some() => {
+                let (k, i, c) = cx.cell_rng.clone().unwrap();
+                format!("sijo_cell_randi({k}, {}u, {i}, {c}++, {}, {})", self.rng_keys.get(&site).copied().unwrap_or(site as u32), a[0], a[1])
+            }
             Builtin::RandomFloat => format!("sijo_randf(w, {}u, {}, {})", self.rng_keys.get(&site).copied().unwrap_or(site as u32), a[0], a[1]),
             Builtin::RandomInt => format!("sijo_randi(w, {}u, {}, {})", self.rng_keys.get(&site).copied().unwrap_or(site as u32), a[0], a[1]),
+            Builtin::GridDir => format!("sijo_grid_dir({}, {}, {})", a[0], a[1], a[2]),
+            Builtin::GridInBounds | Builtin::GridGet => {
+                // args: the grid, the coordinates (and the fallback)
+                let rank = args[0].ty.rank();
+                let t = self.t();
+                let mut o = format!("SijoList {t}g = {}; ", a[0]);
+                for d in 0..rank {
+                    let _ = write!(o, "int32_t {t}c{d} = {}; ", a[1 + d]);
+                }
+                let inb: Vec<String> = (0..rank).map(|d| format!("{t}c{d} >= 0 && {t}c{d} < {t}g.d{d}")).collect();
+                if f == Builtin::GridInBounds {
+                    format!("({{ {o}({}); }})", inb.join(" && "))
+                } else {
+                    let et = self.cty(&args[1 + rank].ty);
+                    let pos = (1..rank).fold(format!("{t}c0"), |acc, d| format!("({acc} * {t}g.d{d} + {t}c{d})"));
+                    let _ = write!(o, "{et} {t}f = {}; ", a[1 + rank]);
+                    format!("({{ {o}({}) ? (({et}*){t}g.data)[{pos}] : {t}f; }})", inb.join(" && "))
+                }
+            }
             Builtin::TimeTick => "w->tick".into(),
             Builtin::TimeDt => "w->dt".into(),
             Builtin::Print => unreachable!(),
@@ -5145,6 +5499,67 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
     // deferred calls & remote reads
     // ------------------------------------------------------------------
 
+    /// [Deferred] host functions, in declaration order: the number a queued call carries
+    fn host_queue_funcs(&self) -> Vec<FuncId> {
+        (0..self.p.funcs.len()).filter(|&f| self.p.funcs[f].extern_name.is_some() && self.p.funcs[f].deferred_attr).collect()
+    }
+    fn host_queue_index(&self, f: FuncId) -> usize {
+        self.host_queue_funcs().iter().position(|&g| g == f).unwrap_or(0)
+    }
+
+    /// For every [Deferred] host function: a sender that queues a call (its arguments copied into the
+    /// command buffer of this thread, the source entity naming its place in row order), and the case
+    /// of sijo_exec_host that makes it. In a sharded run every shard applies every command, so only
+    /// the coordinator makes the calls: the host sees them once, in the order of one process.
+    fn host_queue_plumbing(&mut self) {
+        let fs = self.host_queue_funcs();
+        let mut exec = String::from("static void sijo_exec_host(SijoWorld* w, const SijoCmd* c) {\n  if (w->sh_on && w->sh_id != 0) return; /* the coordinator makes the calls */\n  const uint8_t* d = w->cmd[0].data + c->data; const uint8_t* e_ = d + c->size; int bad_ = 0; (void)d; (void)e_; (void)bad_;\n  switch (c->field) {\n");
+        for (k, &f) in fs.iter().enumerate() {
+            let func = &self.p.funcs[f];
+            let name = func.extern_name.clone().unwrap_or_default();
+            let mut ps = vec!["SijoWorld* w".to_string()];
+            let mut packs = String::new();
+            let mut reads = String::new();
+            let mut frees = String::new();
+            let mut cargs = vec![];
+            for &l in &func.params {
+                let ty = func.locals[l].ty.clone();
+                let ct = self.cty(&ty);
+                ps.push(format!("{ct} a{l}"));
+                match &ty {
+                    Ty::Str => {
+                        packs.push_str(&format!("sijo_cmd_str(b, a{l}); "));
+                        let _ = write!(reads, "    SijoStr a{l} = sijo_cmd_rd_str(&w->frame[0], &d, e_, &bad_);\n");
+                        cargs.push(format!("a{l}.p"));
+                        cargs.push(format!("a{l}.n"));
+                    }
+                    Ty::Array(el) | Ty::List(el) => {
+                        packs.push_str(&self.msg_pack(&ty, &format!("a{l}"), 0));
+                        let rd = self.msg_unpack(&ty, &format!("a{l}"), "0", 0);
+                        let _ = write!(reads, "    SijoList a{l} = {{0}}; {rd}\n");
+                        frees.push_str(&self.free_code(&ty, &format!("a{l}"), 0));
+                        cargs.push(format!("(const {}*)a{l}.data", self.cty(el)));
+                        cargs.push(format!("a{l}.len"));
+                    }
+                    _ => {
+                        packs.push_str(&format!("sijo_cmd_data(b, &a{l}, (uint32_t)sizeof a{l}); "));
+                        let _ = write!(reads, "    {ct} a{l}; memset(&a{l}, 0, sizeof a{l}); if (e_ - d < (ptrdiff_t)sizeof a{l}) bad_ = 1; else {{ memcpy(&a{l}, d, sizeof a{l}); d += sizeof a{l}; }}\n");
+                        cargs.push(format!("a{l}"));
+                    }
+                }
+            }
+            let _ = writeln!(
+                self.out,
+                "/* {label}: queued (made at the end of the stage) */\nstatic void sijo_qhost{k}({ps}) {{\n  int t = sijo_tid(); SijoCmdBuf* b = &w->cmd[t];\n  uint32_t start = b->dn; {packs}\n  if (b->dn - start > 65535u) sijo_panic(\"a [Deferred] host call's arguments take more than 64 KB\");\n  SijoCmd* c = sijo_cmd_push(b);\n  c->kind = SIJO_CMD_HOST; c->target = SIJO_NULL; c->src = w->tls[t].cur; c->field = {k}; c->data = start; c->size = (uint16_t)(b->dn - start);\n}}",
+                label = self.p.func_label(f),
+                ps = ps.join(", ")
+            );
+            let _ = write!(exec, "  case {k}: {{\n{reads}    if (!bad_ && d == e_) {name}({});\n    {frees}\n    break; }}\n", cargs.join(", "));
+        }
+        exec.push_str("  }\n}\n");
+        self.w(&exec);
+    }
+
     fn deferred_plumbing(&mut self) {
         self.w("\n/* ======================= cross-entity calls ======================= */\n");
         // remote-read dispatchers for every non-mutating entity method
@@ -5261,6 +5676,7 @@ static inline int32_t sijo_hrow(SijoWorld* w, SijoH h, int arch) {
             self.w("    }\n    break; }\n");
         }
         self.w("  }\n}\n");
+        self.host_queue_plumbing();
         // command application at the end of a stage. With components, Add/Remove commands are
         // collected in command order and applied after the destroys (a destroyed entity gains
         // nothing), before the spawned entities join their tables
@@ -5277,11 +5693,12 @@ static void sijo_apply(SijoWorld* w) {
   SijoCmdBuf* b = &w->cmd[0];
   for (int32_t i = 0; i < b->n; i++) {
     SijoCmd c = b->c[i];
-    w->tls[0].cur = c.target; w->tls[0].rng_ent = sijo_ekey(c.target); w->tls[0].rng_ctr = 0;
+    w->tls[0].cur = c.target; w->tls[0].rng_ent = sijo_ekey(c.target); w->tls[0].rng_ctr = 0; w->tls[0].rng_ok = 0;
     w->cmds_applied++;
     switch (c.kind) {
     case SIJO_CMD_SET: case SIJO_CMD_ADDI: case SIJO_CMD_ADDF: sijo_apply_field(w, &c); break;
     case SIJO_CMD_CALL: sijo_exec_call(w, &c); break;
+    case SIJO_CMD_HOST: sijo_exec_host(w, &c); break;
     case SIJO_CMD_DESTROY:
       if (w->dn == w->dcap) { w->dcap = w->dcap ? w->dcap * 2 : 64; w->dlist = (SijoH*)sijo_xrealloc(w->dlist, (size_t)w->dcap * sizeof(SijoH)); }
       w->dlist[w->dn++] = c.target; break;
@@ -5317,7 +5734,7 @@ static void sijo_merge_threads(SijoWorld* w) {
                 // parallel region (which would keep the loop from being vectorized), `dt` read once
                 let e = &s.eff;
                 // spawns and prints also name their entity: on shards it orders them (src/shard.rs)
-                let needs_ctx = e.random || !e.remote_writes.is_empty() || !e.remote_calls.is_empty() || e.destroys_self || !e.destroys.is_empty() || e.restructures_self || !e.restructures.is_empty() || !e.rpcs.is_empty() || !e.msg_writes.is_empty() || self.shard.own_spawns.contains(&i) || e.prints;
+                let needs_ctx = e.random || !e.remote_writes.is_empty() || !e.remote_calls.is_empty() || e.destroys_self || !e.destroys.is_empty() || e.restructures_self || !e.restructures.is_empty() || !e.rpcs.is_empty() || !e.msg_writes.is_empty() || self.shard.own_spawns.contains(&i) || e.prints || !e.host_queue.is_empty();
                 // a partitioned system on a shard runs only the rows this shard owns
                 let part = s.kind == SysKind::Entity && self.shard.mode[i] == crate::shard::Mode::Part;
                 for &a in &s.archetypes {
@@ -5331,7 +5748,7 @@ static void sijo_merge_threads(SijoWorld* w) {
                     };
                     let call = if takes_dt { format!("{}(w, {vp}r, dt_)", mname) } else { format!("{}(w, {vp}r)", mname) };
                     let (tl, ctx) = if needs_ctx {
-                        ("\n  SijoTls* tl = &w->tls[sijo_tid()];", format!("SijoH me = w->{n}.ent[r]; tl->cur = me; tl->rng_ent = sijo_ekey(me); tl->rng_ctr = 0;\n    "))
+                        ("\n  SijoTls* tl = &w->tls[sijo_tid()];", format!("SijoH me = w->{n}.ent[r]; tl->cur = me; tl->rng_ent = sijo_ekey(me); tl->rng_ctr = 0; tl->rng_ok = 0;\n    "))
                     } else {
                         ("", String::new())
                     };
@@ -5685,10 +6102,10 @@ static void sijo_merge_threads(SijoWorld* w) {
                 }
             }
             SysKind::Global => {
-                let _ = writeln!(self.out, "  w->tls[0].cur = SIJO_NULL; w->tls[0].rng_ent = 0; w->tls[0].rng_ctr = 0;\n  {}(w, w->dt);", self.func_name(s.func));
+                let _ = writeln!(self.out, "  w->tls[0].cur = SIJO_NULL; w->tls[0].rng_ent = 0; w->tls[0].rng_ctr = 0; w->tls[0].rng_ok = 0;\n  {}(w, w->dt);", self.func_name(s.func));
             }
             SysKind::ClientGlobal => {
-                let _ = writeln!(self.out, "  w->tls[0].rng_ent = 0; w->tls[0].rng_ctr = 0;\n  {}(w);", self.func_name(s.func));
+                let _ = writeln!(self.out, "  w->tls[0].rng_ent = 0; w->tls[0].rng_ctr = 0; w->tls[0].rng_ok = 0;\n  {}(w);", self.func_name(s.func));
             }
         }
         self.w("}\n");
@@ -6900,6 +7317,12 @@ static int32_t sijo_padd{i}(SijoWorld* w, SijoPStore{i}* s, SijoStr k) {{\n  if 
                     // the new row holds the field's initial collection (`int[] F = new int[4]`)
                     code = format!("{} {code}", self.free_code(&self.p.fields[f].ty, &place, 0));
                 }
+                if let Some(n) = self.p.fields[f].fixed_len {
+                    // saved by a build that declared another length: it starts again with the declared one
+                    let fresh = self.field_default(f);
+                    let fr = self.free_code(&self.p.fields[f].ty, &place, 0);
+                    code = format!("{code} if (({place}).len != {n}) {{ {fr} {place} = {fresh}; sijo_note(report, \" resized:\", {}, \"\"); }}", c_str(&self.p.field_label(f)));
+                }
                 // a range added or narrowed since the state was saved: saturate the old value like
                 // every other write (and say so), so the contract holds from the first tick
                 let cl = self.clamp_code(f, &format!("(&{place})"));
@@ -7002,7 +7425,7 @@ static void sijo_reset_arenas(SijoWorld* w) {{
   for (int t = 0; t < SIJO_MAX_THREADS; t++) sijo_arena_reset(&w->frame[t]);
 }}
 static void sijo_game_start(SijoWorld* w) {{
-  w->tick = 0; w->tls[0].cur = SIJO_NULL; w->tls[0].rng_ent = 0; w->tls[0].rng_ctr = 0;
+  w->tick = 0; w->tls[0].cur = SIJO_NULL; w->tls[0].rng_ent = 0; w->tls[0].rng_ctr = 0; w->tls[0].rng_ok = 0;
   {start}
   sijo_apply(w);
 }}
@@ -7021,6 +7444,8 @@ static void sijo_print_counts(SijoWorld* w) {{ {counts}(void)w; }}
             self.w(&h);
             let api = EMBED_RUNTIME.replace("GAMEAPI_", &format!("{}_", self.prefix));
             self.w(&api);
+            let (_, defs) = self.host_accessors();
+            self.w(&defs);
         } else {
             self.w("\nint main(int argc, char** argv) { return sijo_main(argc, argv); }\n");
         }

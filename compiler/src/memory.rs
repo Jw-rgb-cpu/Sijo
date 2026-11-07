@@ -246,11 +246,14 @@ fn walk_expr(e: &Expr, dest: Dest, fm: &mut FnMem) {
             walk_expr(value, d, fm);
         }
         ExprKind::ListNew { site } => fm.producers.push((Producer::Site(*site), dest)),
-        ExprKind::ListLambda { op, site, list, body, .. } => {
+        ExprKind::ListLambda { op, site, list, body, args, .. } => {
             if op.makes_list() {
                 fm.producers.push((Producer::Site(*site), dest));
             }
             walk_expr(list, Dest::Temp, fm);
+            for a in args {
+                walk_expr(a, Dest::Temp, fm);
+            }
             walk_expr(body, Dest::Temp, fm);
         }
         ExprKind::ArrayNew { site, len, elems, dims } => {

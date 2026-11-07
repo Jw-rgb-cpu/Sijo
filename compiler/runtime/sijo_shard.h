@@ -345,7 +345,7 @@ static inline void sijo_shw_patch32(SijoShW* b, size_t at, uint32_t v) {
     q[0] = (uint8_t)v; q[1] = (uint8_t)(v >> 8); q[2] = (uint8_t)(v >> 16); q[3] = (uint8_t)(v >> 24);
 }
 /* commands whose arguments are bytes in the buffer: field writes, messages, added components */
-static inline int sijo_sh_cmd_has_data(uint32_t kind) { return kind == SIJO_CMD_SET || kind == SIJO_CMD_CALL || kind == SIJO_CMD_CADD; }
+static inline int sijo_sh_cmd_has_data(uint32_t kind) { return kind == SIJO_CMD_SET || kind == SIJO_CMD_CALL || kind == SIJO_CMD_CADD || kind == SIJO_CMD_HOST; }
 static inline size_t sijo_sh_sec_begin(SijoShW* b) { size_t at = b->n; sijo_shw_u32(b, 0); return at; }
 static inline void sijo_sh_sec_end(SijoShW* b, size_t at) { sijo_shw_patch32(b, at, (uint32_t)(b->n - at - 4)); }
 

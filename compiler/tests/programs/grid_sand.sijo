@@ -1,0 +1,185 @@
+// Grid operations against hand-written loops with the same rules (tests/grid.rs): sand that falls
+// with Move, and a reference that resolves the same proposals with nested loops; a heat stencil with
+// Step against a copy-and-loop version; Flood and Ray. Every tick the two grids must be equal.
+public enum ECell
+{
+    Empty,
+    Sand,
+    Wall,
+}
+
+public static class K
+{
+    public const int W = 96;
+    public const int H = 80;
+}
+
+public static class Rules
+{
+    // where a cell wants to go (the same function for Move and the reference)
+    public static int Propose(ECell[,] g, int x, int y, ECell c, int side)
+    {
+        if (c != ECell.Sand)
+        {
+            return Grid.Stay;
+        }
+        if (g.Get(x, y + 1, ECell.Wall) == ECell.Empty)
+        {
+            return Grid.Dir(0, 1);
+        }
+        if (g.Get(x + side, y + 1, ECell.Wall) == ECell.Empty)
+        {
+            return Grid.Dir(side, 1);
+        }
+        if (g.Get(x - side, y + 1, ECell.Wall) == ECell.Empty)
+        {
+            return Grid.Dir(-side, 1);
+        }
+        return Grid.Stay;
+    }
+}
+
+public class World : Entity
+{
+    public mut Grid<ECell> A = new Grid<ECell>(K.W, K.H);
+    public mut Grid<ECell> B = new Grid<ECell>(K.W, K.H);
+    public mut Grid<int> HeatA = new Grid<int>(K.W, K.H);
+    public mut Grid<int> HeatB = new Grid<int>(K.W, K.H);
+    public mut int Mismatch;
+    public mut int Sand;
+
+    public void Update(float dt)
+    {
+        int side = Time.Tick % 3 == 0 ? -1 : 1;
+        // the same new sand in both (Random keyed by the cell, so this is order-independent)
+        A.Step((x, y, c) => y < 2 && c == ECell.Empty && Random.Int(0, 7) == 0 ? ECell.Sand : (y == K.H - 1 || (y == 50 && x > 20 && x < 60) ? ECell.Wall : c));
+        for (int x = 0; x < K.W; x++)
+        {
+            for (int y = 0; y < K.H; y++)
+            {
+                B[x, y] = A[x, y];
+            }
+        }
+        A.Move(ECell.Empty, (x, y, c) => Rules.Propose(A, x, y, c, side));
+        moveByHand(side);
+        HeatA.Step((x, y, h) => x == 0 || y == 0 || x == K.W - 1 || y == K.H - 1 ? 640 : (HeatA[x - 1, y] + HeatA[x + 1, y] + HeatA[x, y - 1] + HeatA[x, y + 1] + 4 * h) / 8);
+        heatByHand();
+        mut int bad = 0;
+        mut int n = 0;
+        for (int x = 0; x < K.W; x++)
+        {
+            for (int y = 0; y < K.H; y++)
+            {
+                if (A[x, y] != B[x, y] || HeatA[x, y] != HeatB[x, y])
+                {
+                    bad += 1;
+                }
+                if (A[x, y] == ECell.Sand)
+                {
+                    n += 1;
+                }
+            }
+        }
+        Mismatch += bad;
+        Sand = n;
+    }
+
+    // Move's rule written out: a free cell takes the first neighbour (in the fixed order) that
+    // proposes to move into it; a cell leaves when the free cell it proposes takes it
+    private void moveByHand(int side)
+    {
+        int[] dx = { 0, 0, 1, -1, 1, -1, 1, -1 };
+        int[] dy = { 1, -1, 0, 0, 1, 1, -1, -1 };
+        mut ECell[,] next = new ECell[K.W, K.H];
+        for (int x = 0; x < K.W; x++)
+        {
+            for (int y = 0; y < K.H; y++)
+            {
+                ECell c0 = B[x, y];
+                mut ECell res = c0;
+                if (c0 == ECell.Empty)
+                {
+                    for (int k = 0; k < 8; k++)
+                    {
+                        int sx = x - dx[k];
+                        int sy = y - dy[k];
+                        if (B.InBounds(sx, sy) && B[sx, sy] != ECell.Empty && Rules.Propose(B, sx, sy, B[sx, sy], side) == Grid.Dir(dx[k], dy[k]))
+                        {
+                            res = B[sx, sy];
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    int pd = Rules.Propose(B, x, y, c0, side);
+                    if (pd != Grid.Stay)
+                    {
+                        // Grid.Dir(dx, dy) = 1 + (dx + 1) + 3 * (dy + 1) + 9 (dz = 0)
+                        int tx = x + (pd - 1) % 3 - 1;
+                        int ty = y + (pd - 1) / 3 % 3 - 1;
+                        if (B.InBounds(tx, ty) && B[tx, ty] == ECell.Empty)
+                        {
+                            for (int k = 0; k < 8; k++)
+                            {
+                                int sx = tx - dx[k];
+                                int sy = ty - dy[k];
+                                if (B.InBounds(sx, sy) && B[sx, sy] != ECell.Empty && Rules.Propose(B, sx, sy, B[sx, sy], side) == Grid.Dir(dx[k], dy[k]))
+                                {
+                                    if (sx == x && sy == y)
+                                    {
+                                        res = ECell.Empty;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                next[x, y] = res;
+            }
+        }
+        B = next;
+    }
+
+    private void heatByHand()
+    {
+        mut int[,] next = new int[K.W, K.H];
+        for (int x = 0; x < K.W; x++)
+        {
+            for (int y = 0; y < K.H; y++)
+            {
+                if (x == 0 || y == 0 || x == K.W - 1 || y == K.H - 1)
+                {
+                    next[x, y] = 640;
+                }
+                else
+                {
+                    next[x, y] = (HeatB[x - 1, y] + HeatB[x + 1, y] + HeatB[x, y - 1] + HeatB[x, y + 1] + 4 * HeatB[x, y]) / 8;
+                }
+            }
+        }
+        HeatB = next;
+    }
+}
+
+public static class Game
+{
+    public static void Start()
+    {
+        Spawn(new World { });
+    }
+
+    public static void Update(float dt)
+    {
+        foreach (var w in Query<World>())
+        {
+            if (Time.Tick % 50 == 0)
+            {
+                int hit = w.A.Ray(48, 0, 48, K.H - 1, c => c != ECell.Empty);
+                int diag = w.A.Ray(0, 0, K.W - 1, K.H - 1, c => c == ECell.Wall);
+                Print($"tick {Time.Tick}: sand {w.Sand} mismatches {w.Mismatch} heat {w.HeatA[48, 40]} ray {hit} {diag}");
+            }
+        }
+    }
+}

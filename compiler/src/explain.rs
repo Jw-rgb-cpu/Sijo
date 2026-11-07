@@ -373,8 +373,174 @@ pub fn report(c: &Compiled, sm: &crate::diag::SourceMap) -> String {
     for (f, _, why) in &c.spatial.rejected {
         let _ = writeln!(o, "  {}: proximity loop kept as a full scan: {}", p.func_label(*f), why);
     }
+    // ---------------- grids
+    let _ = writeln!(o, "\n[grids] cell-parallel operations (Step, Move, Ray)");
+    o.push_str(&crate::grid::report(c, sm));
+    // ---------------- bounds checks left in loops
+    let kept = kept_checks(c, &sm.text);
+    let _ = writeln!(o, "\n[bounds checks] {} removed; {} left inside loops", c.opt.bounds_checks_removed + c.opt.range_bce, kept.len());
+    if kept.is_empty() {
+        let _ = writeln!(o, "  (every list and array index inside a loop is proven in range, or there are none)");
+    }
+    const SHOWN: usize = 40;
+    for (f, sp, text, why) in kept.iter().take(SHOWN) {
+        let why = match why {
+            (w, Some(at)) => format!("{} (line {})", w, line(*at)),
+            (w, None) => w.clone(),
+        };
+        let _ = writeln!(o, "  line {}: {}: `{}` keeps its check: {}", line(*sp), p.func_label(*f), text, why);
+    }
+    if kept.len() > SHOWN {
+        let _ = writeln!(o, "  ... and {} more", kept.len() - SHOWN);
+    }
     // ---------------- distributed simulation
     let _ = writeln!(o);
     o.push_str(&crate::shard::report(c, &crate::shard::plan(c)));
     o
+}
+
+/// Indexes inside loops that still check their bounds after optimization, with the reason the loop
+/// does not prove them: (function, index span, source text, (why, where)).
+fn kept_checks(c: &Compiled, text: &str) -> Vec<(FuncId, crate::diag::Span, String, (String, Option<crate::diag::Span>))> {
+    let p = &c.prog;
+    let mut out = vec![];
+    for (fid, f) in p.funcs.iter().enumerate() {
+        if f.synth.is_some() || f.extern_name.is_some() {
+            continue;
+        }
+        walk_loops(c, text, fid, &f.body, &mut out);
+    }
+    out.sort_by_key(|x| x.1.lo);
+    out
+}
+
+fn walk_loops(c: &Compiled, text: &str, fid: FuncId, b: &Block, out: &mut Vec<(FuncId, crate::diag::Span, String, (String, Option<crate::diag::Span>))>) {
+    for (k, s) in b.stmts.iter().enumerate() {
+        match s {
+            Stmt::Loop { cond, step, body, do_while } => {
+                let prev = if k > 0 { Some(&b.stmts[k - 1]) } else { None };
+                // indexes directly in this loop (inner loops report their own)
+                let mut found: Vec<(crate::diag::Span, Expr, Expr)> = vec![];
+                collect_checked(body, &mut found);
+                for (sp, list, index) in found {
+                    let why = check_reason(c, prev, cond, step, *do_while, body, &list, &index);
+                    let src = text.get(sp.lo as usize..sp.hi as usize).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                    out.push((fid, sp, src, why));
+                }
+                walk_loops(c, text, fid, body, out);
+            }
+            _ => {
+                for x in s.sub_blocks() {
+                    walk_loops(c, text, fid, x, out);
+                }
+            }
+        }
+    }
+}
+
+/// checked `list[index]` in a block, not descending into nested loops (whose own loop explains them)
+fn collect_checked(b: &Block, out: &mut Vec<(crate::diag::Span, Expr, Expr)>) {
+    for s in &b.stmts {
+        let mut exprs: Vec<&Expr> = vec![];
+        match s {
+            Stmt::Let { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) => exprs.push(e),
+            Stmt::If { cond, .. } => exprs.push(cond),
+            Stmt::Switch { scrut, sections, .. } => {
+                exprs.push(scrut);
+                exprs.extend(sections.iter().map(|(c, _)| c));
+            }
+            Stmt::ForList { list, .. } => exprs.push(list),
+            _ => {}
+        }
+        for e in exprs {
+            crate::sema::visit_expr(e, &mut |x| {
+                if let ExprKind::ListIndex { list, index, checked } = &x.kind {
+                    let md = match &index.kind {
+                        ExprKind::MdIndex { checked, .. } => checked.iter().any(|c| *c),
+                        _ => false,
+                    };
+                    if *checked || md {
+                        out.push((x.span, (**list).clone(), (**index).clone()));
+                    }
+                }
+            });
+        }
+        if !matches!(s, Stmt::Loop { .. }) {
+            for x in s.sub_blocks() {
+                collect_checked(x, out);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_reason(c: &Compiled, prev: Option<&Stmt>, cond: &Option<Expr>, step: &[Expr], do_while: bool, body: &Block, list: &Expr, index: &Expr) -> (String, Option<crate::diag::Span>) {
+    let p = &c.prog;
+    let _ = p;
+    // the loop counter, when the condition is `i < bound`
+    let counter = match cond.as_ref().map(|c| &c.kind) {
+        Some(ExprKind::Binary(_, l, _)) => match l.kind {
+            ExprKind::Local(i) => Some(i),
+            _ => None,
+        },
+        _ => None,
+    };
+    let idx_local = match &index.kind {
+        ExprKind::Local(i) => Some(*i),
+        ExprKind::MdIndex { idx, .. } => idx.iter().find_map(|x| match x.kind {
+            ExprKind::Local(i) if Some(i) == counter => Some(i),
+            _ => None,
+        }),
+        _ => None,
+    };
+    let Some(i) = idx_local else {
+        return ("the index is computed (like `i + 1` or `y * W + x`), not the loop counter: only a plain counter running to this list's length, or a range the optimizer proves from constant lengths, drops the check".into(), None);
+    };
+    if Some(i) != counter {
+        return ("the index is not the counter of this loop".into(), None);
+    }
+    // the counter runs to some bound: is it this list's length?
+    let bound_list = match cond.as_ref().map(|c| &c.kind) {
+        Some(ExprKind::Binary(_, _, r)) => match &r.kind {
+            ExprKind::ListLen(l) => Some((**l).clone()),
+            ExprKind::Builtin { f: Builtin::ArrayGetLength, args, .. } => Some(args[0].clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    match bound_list {
+        None => {
+            let field = match &list.kind {
+                ExprKind::EField { field, .. } => Some(*field),
+                _ => None,
+            };
+            let why = match field.map(|f| (f, p.fields[f].fixed_len)) {
+                Some((_, Some(n))) => format!("the loop does not count from 0 up to at most the declared length ({}) with `i < N`", n),
+                Some((f, None)) if matches!(p.fields[f].ty, Ty::Array(_)) => format!(
+                    "the loop runs to a number, not to `{}.Length`; declaring the field with its length (`{}[N] {}`) lets the compiler prove it",
+                    p.fields[f].name,
+                    p.ty_name(&p.fields[f].ty).trim_end_matches("[]"),
+                    p.fields[f].name
+                ),
+                _ => "the loop runs to a number, not to this list's length (`i < xs.Length`), and the list's length is not known at compile time".into(),
+            };
+            (why, None)
+        }
+        Some(bl) if !same_list(&bl, list) => ("the loop runs to the length of another list".into(), None),
+        Some(_) => crate::opt::loop_check_reason(prev, cond, step, do_while, body).unwrap_or_else(|| ("the counter's range does not fit this index's dimension".into(), None)),
+    }
+}
+
+fn same_list(a: &Expr, b: &Expr) -> bool {
+    match (&a.kind, &b.kind) {
+        (ExprKind::Local(x), ExprKind::Local(y)) => x == y,
+        (ExprKind::EField { base: ba, field: fa }, ExprKind::EField { base: bb, field: fb }) => {
+            fa == fb && match (&ba.kind, &bb.kind) {
+                (ExprKind::SelfRef, ExprKind::SelfRef) => true,
+                (ExprKind::Local(x), ExprKind::Local(y)) => x == y,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }

@@ -1,0 +1,34 @@
+public class Vox : Entity
+{
+    public mut Grid3<int> G = new Grid3<int>(20, 16, 12);
+    public mut Grid<int> F = new Grid<int>(10, 10);
+    public mut int Count;
+    public void Update(float dt)
+    {
+        if (Time.Tick == 1)
+        {
+            G.Fill(0);
+            G.Step((x, y, z, v) => (x + y + z) % 7 == 0 ? 1 : 0);
+            F.Step((x, y, v) => x == 5 || y == 5 ? 1 : 0);
+            Count = F.Flood(0, 0, 7) * 1000 + F.Flood(9, 9, 7);
+        }
+        G.Move(0, (x, y, z, v) => v == 1 && G.Get(x, y, z + 1, 1) == 0 ? Grid.Dir(0, 0, 1) : Grid.Stay);
+        G.Step((x, y, z, v) => v + G.Get(x - 1, y, z, 0) * 0 + Random.Int(0, 1));
+    }
+}
+public static class Game
+{
+    public static void Start() { Spawn(new Vox { }); }
+    public static void Update(float dt)
+    {
+        foreach (var v in Query<Vox>())
+        {
+            if (Time.Tick % 10 == 0)
+            {
+                mut int bottom = 0;
+                for (int x = 0; x < 20; x++) { for (int y = 0; y < 16; y++) { bottom += v.G[x, y, 11]; } }
+                Print($"tick {Time.Tick} flood {v.Count} bottom {bottom} ray {v.G.Ray(0, 0, 0, 19, 15, 11, c => c == 1)} dims {v.G.Width}x{v.G.Height}x{v.G.Depth}");
+            }
+        }
+    }
+}

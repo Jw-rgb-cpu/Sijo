@@ -36,13 +36,15 @@
 
 ## 개발 도구: 자동 린터 · 인텔리센스 · 라이브 코딩
 
-- **자동 린터** (`sijoc lint`): Sijo 코딩 표준(이름·서식), .NET 분석기, clang-tidy에서 가져온 규칙과 Sijo 게임 규칙 37개입니다. 게임 규칙의 예는 "여러 엔티티가 같은 필드에 대입하면 마지막 것만 남음", "이 Print 때문에 시스템이 직렬 실행됨", "범위 없는 float 복제는 32비트로 전송됨"입니다. `--fix`는 의미 인덱스를 써서 안전하게 이름을 바꾸고 `var`를 명시 타입으로 바꿉니다. 수정 전후 실행 결과가 같은지 테스트로 확인합니다. 항상 중괄호·선언 하나에 이름 하나·완전한 switch 문·재귀 함수의 `[Recursive]`는 린트가 아니라 문법입니다(컴파일 오류).
+- **자동 린터** (`sijoc lint`): Sijo 코딩 표준(이름·서식), .NET 분석기, clang-tidy에서 가져온 규칙과 Sijo 게임 규칙 38개입니다. 게임 규칙의 예는 "여러 엔티티가 같은 필드에 대입하면 마지막 것만 남음", "이 Print·extern 호출 때문에 시스템이 직렬 실행됨", "범위 없는 float 복제는 32비트로 전송됨"입니다. `build`는 이런 게임 규칙을 이름 힌트보다 먼저 보여 주고, 병렬이던 시스템이 직렬이 되면 다음 빌드에서 알립니다(스케줄 기준선). 수학·좌표 코드용 `game` 프리셋이 있습니다. `--fix`는 의미 인덱스를 써서 안전하게 이름을 바꾸고 `var`를 명시 타입으로 바꿉니다. 수정 전후 실행 결과가 같은지 테스트로 확인합니다. 항상 중괄호·선언 하나에 이름 하나·완전한 switch 문·재귀 함수의 `[Recursive]`는 린트가 아니라 문법입니다(컴파일 오류).
 - **인텔리센스** (`sijoc lsp`, VS Code 확장 `editors/vscode`): 자동 완성, 정의 이동, 참조 찾기, 이름 변경, 빠른 수정을 지원합니다. 호버와 인레이 힌트에는 컴파일러의 결정이 함께 보입니다. 예: `Hp → Ship_C2 · server-only · [0,100]로 클램프 · Bullet.Update가 deferred ADD`, `Update → stage 1 · parallel`.
 - **라이브 코딩** (`sijoc live`): 게임을 실행한 채 코드를 저장하면 약 0.3초 뒤 새 코드로 같은 틱부터 이어서 실행합니다. 상태는 필드 이름 기준으로 옮겨집니다(새 필드는 기본값, 삭제된 필드는 버림). 컴파일 오류가 나면 이전 빌드가 계속 돕니다.
 
 - **여러 파일 프로젝트** (`sijo.toml`): 진단·린트 수정·라이브 코딩·언어 서버(파일 간 정의 이동·이름 변경)가 프로젝트 단위로 동작합니다.
 - **디버깅**: 생성 C에 `#line`이 들어가 런타임 오류가 `sijo panic: list index out of range / at units/Ship.sijo:42`처럼 .sijo 줄을 알려 주고, `--debug` 빌드는 gdb에서 .sijo 줄 단위로 디버깅됩니다.
-- **엔진 연결**: `sijoc build game --lib`은 `sijo_game.h` 임베딩 API(생성·한 틱·그리기 목록·저장/복원·스레드 수·패닉 복구)를 만듭니다. C·C++·C#(P/Invoke)·Python(ctypes)·Rust·Go 호스트에서 같은 결과로 도는 것을 확인했습니다. `--host host.c`는 호스트 프로그램과 함께, `--externs ext.c`는 sijoc의 `main`(네트워크 모드 포함)을 유지한 채 빌드합니다.
+- **엔진 연결**: `sijoc build game --lib`은 `sijo_game.h` 임베딩 API(생성·한 틱·그리기 목록·저장/복원·스레드 수·패닉 복구, public 엔티티 필드 읽기)를 만듭니다. `extern`에는 숫자 배열을 포인터와 길이로 넘기고, 결과가 없는 호출은 `[Deferred]`로 쌓아 시스템을 병렬로 둡니다. C·C++·C#(P/Invoke)·Python(ctypes)·Rust·Go 호스트에서 같은 결과로 도는 것을 확인했습니다. `--host host.c`는 호스트 프로그램과 함께, `--externs ext.c`는 sijoc의 `main`(네트워크 모드 포함)을 유지한 채 빌드합니다.
+- **웹** (`sijoc build game --target wasm32`): clang만으로 WebAssembly 모듈, JS 로더, 웹 페이지를 만듭니다(C 라이브러리는 런타임에 포함). 결과가 네이티브와 비트 단위로 같고, 패닉은 모듈을 멈추지 않고 `error()`가 됩니다.
+- **격자** (`Grid<T>`, `Grid3<T>`): `Step`(맵·스텐실)과 `Move`(이동 충돌 해결)를 칸 단위로 병렬·결정론적으로 실행하고, 가장자리에서 먼 칸은 경계 검사 없이 계산합니다. `Ray`, `Flood`도 있습니다.
 - **검사 모드**: `--checked`는 C#의 `checked`처럼 정수 오버플로·범위 밖 float → int 변환을 .sijo 줄과 함께 패닉으로 알립니다.
 
 자세한 내용: [docs/10-tooling.md](docs/10-tooling.md)
@@ -51,11 +53,11 @@
 
 ```bash
 cd compiler && cargo build --release        # Rust 표준 라이브러리만 사용 (의존성 0)
-./target/release/sijoc --version            # sijoc 0.1.0
+./target/release/sijoc --version            # sijoc 0.1.1
 ./target/release/sijoc explain ../examples/arena.sijo   # 컴파일러의 모든 결정과 이유
 ./target/release/sijoc run ../examples/arena.sijo -- --ticks 600 --render
 ./target/release/sijoc run ../examples/boids.sijo -- --ticks 300 --shards 4 --timing
-cargo test --release                        # 309개 테스트 (진단 106, 파서 19, 이동 13, 범위 11, 인터페이스 6, 컴포넌트 19, 컴파일러 지능 10, 종단 간 48, 임베딩 4, 교차 플랫폼 1, 네트워크 22, 샤드 8, 도구 27, 단위 15; ASan/UBSan/LSan 포함)
+cargo test --release                        # 315개 테스트 (진단 106, 파서 19, 이동 13, 범위 11, 인터페이스 6, 컴포넌트 19, 컴파일러 지능 10, 종단 간 48, 임베딩 4, 격자 4, wasm 2, 교차 플랫폼 1, 네트워크 22, 샤드 8, 도구 27, 단위 15; ASan/UBSan/LSan 포함)
 ./target/release/sijoc lint ../examples/arena.sijo --fix   # 코딩 표준 자동 수정
 ./target/release/sijoc live ../examples/arena.sijo -- --render-every 60   # 라이브 코딩
 ./target/release/sijoc lsp                  # 편집기용 언어 서버 (VS Code: editors/vscode)
@@ -181,7 +183,7 @@ docs/                        설계 명세
 
 ## 상태
 
-**버전 0.1.0** — Sijo의 첫 버전이며, 실제로 게임을 만들 수 있는 단계를 목표로 하는 **프로토타입**입니다. 언어(문자열·`char`·배열·중첩 컬렉션·람다·제네릭·인터페이스·런타임 컴포넌트·사전·코루틴·switch), 자동 ECS·병렬화·공간 격자, 엔진 연결, 서버 ↔ 클라이언트 복제(엔티티 참조·문자열·리스트·사전, 컬렉션 안의 참조와 큰 리스트의 원소 단위 델타, IPv4/IPv6 실제 UDP), 한 프로세스와 같은 결과를 내는 샤드 프로세스가 동작합니다. 모든 기능은 실행 테스트(ASan/UBSan, 스레드 수 무관 체크섬, 저장·복원 동일성)로 확인하고, 플랫폼 행렬·다른 언어 구현과의 비교·퍼징 결과는 [11장](docs/11-verification.md)에 있습니다. 렌더 보간·플레이어별 인증·큰 스냅샷의 손실·코디네이터 복구 등 남은 한계는 [로드맵](docs/08-roadmap.md)과 [11.6절](docs/11-verification.md)에 정리했습니다. 버전별 변경은 [CHANGELOG.md](CHANGELOG.md)에 적습니다.
+**버전 0.1.1** — 실제로 게임을 만들 수 있는 단계를 목표로 하는 **프로토타입**입니다. 언어(문자열·`char`·배열·고정 길이 배열 필드·중첩 컬렉션·람다·제네릭·인터페이스·런타임 컴포넌트·사전·코루틴·switch), 자동 ECS·병렬화·공간 격자, 칸 단위 병렬 격자(`Grid<T>`), 엔진 연결과 웹(wasm32), 서버 ↔ 클라이언트 복제(엔티티 참조·문자열·리스트·사전, 컬렉션 안의 참조와 큰 리스트의 원소 단위 델타, IPv4/IPv6 실제 UDP), 한 프로세스와 같은 결과를 내는 샤드 프로세스가 동작합니다. 모든 기능은 실행 테스트(ASan/UBSan, 스레드 수 무관 체크섬, 저장·복원 동일성)로 확인하고, 플랫폼 행렬·다른 언어 구현과의 비교·퍼징 결과는 [11장](docs/11-verification.md)에 있습니다. 렌더 보간·플레이어별 인증·큰 스냅샷의 손실·코디네이터 복구 등 남은 한계는 [로드맵](docs/08-roadmap.md)과 [11.6절](docs/11-verification.md)에 정리했습니다. 버전별 변경은 [CHANGELOG.md](CHANGELOG.md)에 적습니다.
 
 ## 라이선스
 

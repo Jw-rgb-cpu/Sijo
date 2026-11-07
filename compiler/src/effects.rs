@@ -30,7 +30,17 @@ pub struct Effects {
     pub msg_writes: BTreeSet<FieldId>,
     /// entity methods invoked on the server through client->server RPC
     pub rpcs: BTreeSet<FuncId>,
+    /// output outside the world: a `Print` or a host function call (see `externs`)
     pub prints: bool,
+    /// host functions (`extern` without [Pure]) called here or in the functions called: their effects
+    /// happen in call order, so a system that makes them runs serially (`prints` is set too)
+    pub externs: BTreeSet<FuncId>,
+    /// a `Print` (not only host calls) is among the outputs
+    pub print_stmt: bool,
+    /// calls of `[Deferred]` host functions: queued with their arguments and made in command order
+    /// at the end of the stage (on the coordinator of a sharded run), so they do not keep a system
+    /// serial; they still order the system with the others that produce output
+    pub host_queue: BTreeSet<FuncId>,
     pub draws: bool,
     pub random: bool,
     pub allocs: bool,
@@ -54,6 +64,9 @@ impl Effects {
         self.msg_writes.extend(&o.msg_writes);
         self.rpcs.extend(&o.rpcs);
         self.prints |= o.prints;
+        self.externs.extend(&o.externs);
+        self.print_stmt |= o.print_stmt;
+        self.host_queue.extend(&o.host_queue);
         self.draws |= o.draws;
         self.random |= o.random;
         self.allocs |= o.allocs;
@@ -70,6 +83,7 @@ impl Effects {
             || !self.remote_calls.is_empty()
             || !self.msg_writes.is_empty()
             || self.prints
+            || !self.host_queue.is_empty()
     }
     pub fn touches_world(&self) -> bool {
         self.mutates() || !self.self_reads.is_empty() || !self.remote_reads.is_empty() || !self.queries.is_empty() || self.random
@@ -252,8 +266,8 @@ pub fn target_field(e: &Expr) -> Option<(FieldId, bool)> {
 fn local_walk(p: &Program, f: &Func) -> LocalInfo {
     let mut li = LocalInfo::default();
     walk_block(p, &f.body, &mut li);
-    if f.extern_name.is_some() && !f.pure_attr {
-        li.eff.prints = true; // host code: effects outside the world
+    if f.extern_name.is_some() && !f.pure_attr && !f.deferred_attr {
+        li.eff.prints = true; // host code: effects outside the world (callers record which one)
     }
     li
 }
@@ -365,9 +379,13 @@ fn walk_expr(p: &Program, e: &Expr, li: &mut LocalInfo, as_target: bool) {
             }
         }
         ExprKind::Call { func, recv, args, dispatch } => {
-            if p.funcs[*func].extern_name.is_some() && !p.funcs[*func].pure_attr {
+            if p.funcs[*func].extern_name.is_some() && p.funcs[*func].deferred_attr {
+                // queued like a message: parallel, and rolled back with an atomic block
+                li.eff.host_queue.insert(*func);
+            } else if p.funcs[*func].extern_name.is_some() && !p.funcs[*func].pure_attr {
                 // host code: unknown effects outside the world (keeps the system serial, not in atomic)
                 li.eff.prints = true;
+                li.eff.externs.insert(*func);
             }
             let recv_class = recv.as_ref().and_then(|r| r.ty.class_of());
             li.calls.push(CallRef { func: *func, dispatch: *dispatch, recv_class, span: e.span });
@@ -444,7 +462,10 @@ fn walk_expr(p: &Program, e: &Expr, li: &mut LocalInfo, as_target: bool) {
         }
         ExprKind::Builtin { f, args, .. } => {
             match f {
-                Builtin::Print => li.eff.prints = true,
+                Builtin::Print => {
+                    li.eff.prints = true;
+                    li.eff.print_stmt = true;
+                }
                 Builtin::DrawSprite | Builtin::DrawText | Builtin::NetView | Builtin::NetClearView => li.eff.draws = true,
                 Builtin::RandomFloat | Builtin::RandomInt => li.eff.random = true,
                 _ => {}
@@ -471,14 +492,17 @@ fn walk_expr(p: &Program, e: &Expr, li: &mut LocalInfo, as_target: bool) {
             }
         }
         ExprKind::ListNew { .. } => li.eff.allocs = true,
-        ExprKind::ListLambda { list, op, body, .. } => {
+        ExprKind::ListLambda { list, op, body, args, .. } => {
             if op.mutates() {
                 record_write(p, list, None, li);
             }
-            if op.makes_list() || *op == LamOp::Sort {
+            if op.makes_list() || *op == LamOp::Sort || matches!(op, LamOp::GridStep | LamOp::GridMove) {
                 li.eff.allocs = true;
             }
             walk_expr(p, list, li, false);
+            for a in args {
+                walk_expr(p, a, li, false);
+            }
             walk_expr(p, body, li, false);
         }
         ExprKind::ArrayNew { len, elems, dims, .. } => {
@@ -575,6 +599,9 @@ fn map_callee(p: &Program, sums: &HashMap<Key, Effects>, c: &CallRef, arch: Opti
             m.restructures.extend(&acc.restructures);
             m.remote_calls = acc.remote_calls.clone();
             m.prints = acc.prints;
+            m.externs = acc.externs.clone();
+            m.print_stmt = acc.print_stmt;
+            m.host_queue = acc.host_queue.clone();
             m.draws = acc.draws;
             m.random = acc.random;
             m.allocs = acc.allocs;
@@ -905,7 +932,17 @@ pub fn describe_effects(p: &Program, e: &Effects) -> String {
         let c: Vec<String> = e.rpcs.iter().map(|f| p.func_label(*f)).collect();
         parts.push(format!("rpc to server {{{}}}", c.join(", ")));
     }
-    if e.prints {
+    if e.print_stmt {
+        parts.push("io".into());
+    }
+    if !e.externs.is_empty() {
+        let c: Vec<String> = e.externs.iter().map(|f| p.func_label(*f)).collect();
+        parts.push(format!("host calls {{{}}}", c.join(", ")));
+    }
+    if !e.host_queue.is_empty() {
+        let c: Vec<String> = e.host_queue.iter().map(|f| p.func_label(*f)).collect();
+        parts.push(format!("queued host calls {{{}}}", c.join(", ")));
+    } else if e.prints && !e.print_stmt {
         parts.push("io".into());
     }
     if e.draws {
@@ -954,6 +991,8 @@ fn atomic_analysis(p: &Program, info: &mut EffectInfo, d: &mut Diags) {
                         let mut ce = Effects::default();
                         if map_callee(p, &info.summaries, c, arch, &mut ce) {
                             ce.prints = false;
+                            ce.print_stmt = false;
+                            ce.externs.clear();
                             ce.draws = false;
                         }
                         e.merge(&ce);

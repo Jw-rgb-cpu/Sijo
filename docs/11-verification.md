@@ -11,7 +11,7 @@
 
 | 항목 | 결과 |
 |---|---|
-| 테스트 | 309개(진단 106, 파서 19, 이동 13, 범위 11, 인터페이스 6, 컴포넌트 19, 컴파일러 지능 10, 종단 간 48, 임베딩 4, 교차 플랫폼 1, 네트워크 22, 샤드 8, 도구 27, 단위 15) 모두 통과. AddressSanitizer·UBSan·LeakSanitizer 실행 포함 |
+| 테스트 | 315개(진단 106, 파서 19, 이동 13, 범위 11, 인터페이스 6, 컴포넌트 19, 컴파일러 지능 10, 종단 간 48, 임베딩 4, 격자 4, wasm 2, 교차 플랫폼 1, 네트워크 22, 샤드 8, 도구 27, 단위 15) 모두 통과. AddressSanitizer·UBSan·LeakSanitizer 실행 포함 |
 | 샤드 수와의 무관성 | 예제 3종과 테스트 프로그램을 한 프로세스, 샤드 월드 2~4개, 샤드 프로세스 2~4개(스레드 1/2/4)로 실행: 출력·월드 체크섬·복제 상태 해시가 모두 같음. 손실 20%·지연·지터·중복이 있는 암호화된 샤드 링크, 실행 중 SIGKILL 뒤 체크포인트 복구에서도 같음(5.7절) |
 | 플랫폼 간 동일성 | gcc·clang, `-O0`~`-O3 -march=native`·`-mfma`, x86-64·ARM64·s390x(빅엔디언), Linux·Windows, 스레드 1~80, OpenMP 유무: 출력과 체크섬이 모두 같음 |
 | 다른 언어와의 동일성 | 에이전트들이 C++·C#·Rust·Go·Java·JavaScript·Python으로 같은 로직을 작성: 모든 출력이 바이트 단위로 같음 |
@@ -31,6 +31,7 @@
 | AArch64 (qemu) | 같음 | FMA 축약 금지 (ARM64는 축약이 기본) |
 | s390x 빅엔디언 (qemu) | 같음 | 해시·RPC 인자·전송을 리틀엔디언으로 |
 | Windows x86-64 (MinGW + wine) | 같음 | Winsock, 바이너리 stdout |
+| WebAssembly (`--target wasm32`, clang 18, node 22) | 같음 (arena·boids·village·격자 프로그램) | 자체 C 라이브러리(`sijo_wasm.h`), `fmodf`를 비트 연산으로 정확히, 비트랩 float → int 변환(`-mnontrapping-fptoint`) |
 | x87 (`-mfpmath=387`) | 빌드 거부 | 초과 정밀도가 결과를 바꾸므로 `#error` |
 | `-ffast-math` | 빌드 거부 | `#error` |
 | `Math.Sin`/`Cos` 등 | 같음 | libm 대신 자체 구현 |

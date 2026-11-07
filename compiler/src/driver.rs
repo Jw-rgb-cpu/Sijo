@@ -31,6 +31,11 @@ pub fn compile(src: &str, diags: &mut Diags) -> Option<Compiled> {
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub dev: bool,
+    /// sijo.toml's `order`: the order entity systems run in (see Program::system_order)
+    pub order: Vec<String>,
+    /// an embedding build (`--lib`, `--host`): public entity fields have host accessors, so they
+    /// keep their storage even when no Sijo code reads them
+    pub lib: bool,
 }
 
 /// Optimizer switches that never change what a program computes (only how fast it runs).
@@ -81,6 +86,11 @@ fn compile_here(src: &str, diags: &mut Diags, opts: &Options, tune: &Tuning) -> 
     if diags.has_errors() {
         return None;
     }
+    prog.system_order = opts.order.clone();
+    sema::check_fixed_len_args(&prog, diags);
+    if diags.has_errors() {
+        return None;
+    }
     // [Recursive] marks the program as written: the calls before optimization folds any away
     let call_edges = sema::call_edges(&prog);
     // facts the linter needs from the program as written (before constant propagation)
@@ -114,6 +124,7 @@ fn compile_here(src: &str, diags: &mut Diags, opts: &Options, tune: &Tuning) -> 
     }
     let analyzed = diags.list.len();
     let info = effects::analyze(&mut prog, diags);
+    crate::grid::check(&prog, &info, diags);
     sema::check_recursive(&prog, &call_edges, diags);
     safety::check(&prog, &info, diags);
     // a struct's copy of an interface's default implementation is checked like the default itself
@@ -121,7 +132,12 @@ fn compile_here(src: &str, diags: &mut Diags, opts: &Options, tune: &Tuning) -> 
     if diags.has_errors() {
         return None;
     }
-    let ecs = ecs::plan_profiled(&prog, &info, diags, opts.dev, &opt.observed_fields, tune.profile.as_ref());
+    // the host reads public fields through the embedding API: they stay even if Sijo never reads them
+    let mut live = opt.observed_fields.clone();
+    if opts.lib {
+        live.extend((0..prog.fields.len()).filter(|&f| prog.fields[f].attrs.public && crate::codegen::host_readable(&prog, &prog.fields[f].ty)));
+    }
+    let ecs = ecs::plan_profiled(&prog, &info, diags, opts.dev, &live, tune.profile.as_ref());
     let mem = memory::plan(&prog);
     let net = net::plan(&prog, &ecs, diags);
     if diags.has_errors() {
@@ -193,6 +209,93 @@ pub fn project_files(inputs: &[String]) -> Vec<PathBuf> {
     files
 }
 
+/// What sijo.toml says (only `order` changes how the program is compiled; `name` names it).
+#[derive(Clone, Debug, Default)]
+pub struct ProjectConfig {
+    pub order: Vec<String>,
+}
+
+/// sijo.toml of the project `inputs` belong to (empty without one). The format is a small part of
+/// TOML: `key = "string"` and `key = ["a", "b"]` (an array may span lines), `#` comments.
+pub fn project_config(inputs: &[String]) -> Result<ProjectConfig, String> {
+    let Some(first) = inputs.first() else { return Ok(ProjectConfig::default()) };
+    let p = Path::new(first);
+    let root = if p.is_dir() && p.join("sijo.toml").is_file() { Some(p.to_path_buf()) } else { project_root(p) };
+    let Some(root) = root else { return Ok(ProjectConfig::default()) };
+    let path = root.join("sijo.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    parse_project_config(&text).map_err(|e| format!("{}: {}", path.display(), e))
+}
+
+pub fn parse_project_config(text: &str) -> Result<ProjectConfig, String> {
+    let mut cfg = ProjectConfig::default();
+    // join the lines of an array that spans lines, without comments
+    let mut items: Vec<(usize, String)> = vec![];
+    let mut open: Option<(usize, String)> = None;
+    for (i, raw) in text.lines().enumerate() {
+        let mut line = String::new();
+        let mut in_str = false;
+        for ch in raw.chars() {
+            if ch == '"' {
+                in_str = !in_str;
+            }
+            if ch == '#' && !in_str {
+                break;
+            }
+            line.push(ch);
+        }
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        match open.take() {
+            Some((at, mut acc)) => {
+                acc.push(' ');
+                acc.push_str(&line);
+                if line.ends_with(']') {
+                    items.push((at, acc));
+                } else {
+                    open = Some((at, acc));
+                }
+            }
+            None => {
+                if line.contains('[') && !line.ends_with(']') && !line.starts_with('[') {
+                    open = Some((i + 1, line));
+                } else {
+                    items.push((i + 1, line));
+                }
+            }
+        }
+    }
+    if let Some((at, _)) = open {
+        return Err(format!("line {}: the array is not closed with ]", at));
+    }
+    let strings = |v: &str, at: usize| -> Result<Vec<String>, String> {
+        let inner = v.trim().strip_prefix('[').and_then(|x| x.strip_suffix(']')).ok_or(format!("line {}: expected an array of strings: [\"A\", \"B\"]", at))?;
+        let mut out = vec![];
+        for part in inner.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let s = part.strip_prefix('"').and_then(|x| x.strip_suffix('"')).ok_or(format!("line {}: '{}' is not a string in quotes", at, part))?;
+            out.push(s.to_string());
+        }
+        Ok(out)
+    };
+    for (at, line) in items {
+        if line.starts_with('[') {
+            continue; // a [table] header: nothing Sijo reads lives in tables yet
+        }
+        let Some((k, v)) = line.split_once('=') else { return Err(format!("line {}: expected 'key = value'", at)) };
+        match k.trim() {
+            "order" => cfg.order = strings(v, at)?,
+            _ => {} // name, and keys for other tools
+        }
+    }
+    Ok(cfg)
+}
+
 pub fn load_project(inputs: &[String]) -> Result<SourceMap, String> {
     let files = project_files(inputs);
     if files.is_empty() {
@@ -206,14 +309,33 @@ pub fn load_project(inputs: &[String]) -> Result<SourceMap, String> {
     Ok(SourceMap::new(v))
 }
 
+/// Errors go to stderr; warnings, hints and summaries of a run without errors go to stdout, so a
+/// shell that treats any stderr output as failure (PowerShell) does not fail a successful build.
+fn emit(level: Level, text: &str) {
+    if level == Level::Error {
+        eprint!("{}", text);
+    } else {
+        print!("{}", text);
+    }
+}
+
 pub fn print_diags(sm: &SourceMap, d: &Diags) {
+    print_diags_q(sm, d, false)
+}
+
+/// `quiet`: only errors
+fn print_diags_q(sm: &SourceMap, d: &Diags, quiet: bool) {
     for x in &d.list {
-        eprint!("{}", sm.render(x));
+        if !quiet || x.level == Level::Error {
+            emit(x.level, &sm.render(x));
+        }
     }
     let e = d.list.iter().filter(|x| x.level == Level::Error).count();
     let w = d.list.len() - e;
-    if e > 0 || w > 0 {
+    if e > 0 {
         eprintln!("{} error(s), {} warning(s)", e, w);
+    } else if w > 0 && !quiet {
+        println!("{} error(s), {} warning(s)", e, w);
     }
 }
 
@@ -226,7 +348,7 @@ a file inside a directory tree with sijo.toml means the whole project)
 
 usage:
   sijoc check   <input>                     type-check, run all safety analyses and the linter
-  sijoc lint    <file.sijo> [--fix] [--preset standard|dotnet] [--deny-warnings]
+  sijoc lint    <file.sijo> [--fix] [--preset standard|game|dotnet] [--deny-warnings]
   sijoc lint    --list                      list all lint rules and their sources
   sijoc live    <file.sijo> [-- <program args>]   live coding: edit while the game runs
   sijoc lsp                                 language server (IntelliSense) on stdin/stdout
@@ -248,7 +370,13 @@ usage:
                 (a compute device when the C compiler has an offload target; same results)
                 --open-tables keeps one table per class with a bit per component (what a
                 class with more than 16 combinations gets) for every class; same results
+                --target wasm32 builds <stem>.wasm with a JS loader and a web page (clang, no
+                C library needed; host functions come from JavaScript)
   sijoc run     <input> [--cc gcc] [--no-openmp] [--externs ext.c] [-- <program args>]
+                build/run/check print errors on stderr and everything else on stdout;
+                --quiet prints only errors (run also passes --quiet on to the program);
+                build/run compare the schedule with .sijo/schedule and warn when a system that
+                ran in parallel runs serially (--accept-schedule records the new schedule)
   sijoc --version                           print the compiler version
 
 program args: --ticks N  --shards N  --seed S  --render  --quiet  (the built program's --help
@@ -260,7 +388,7 @@ lists networking options)",
 
 fn print_lint(sm: &SourceMap, ds: &[crate::lint::LintDiag]) {
     for d in ds {
-        eprint!("{}", sm.render(&d.to_diagnostic()));
+        emit(d.level, &sm.render(&d.to_diagnostic()));
     }
 }
 
@@ -270,7 +398,43 @@ fn lint_summary(ds: &[crate::lint::LintDiag]) -> String {
     let h = ds.len() - e - w;
     let fixable = ds.iter().filter(|d| d.fix.is_some()).count();
     let errs = if e > 0 { format!("{} error(s), ", e) } else { String::new() };
-    format!("lint: {}{} warning(s), {} hint(s), {} auto-fixable (sijoc lint for details)", errs, w, h, fixable)
+    // how many are about the game's behaviour or speed, and how many about names and layout
+    let game = ds.iter().filter(|d| crate::lint::importance(d.code) >= 3).count();
+    let style = ds.iter().filter(|d| crate::lint::importance(d.code) == 0).count();
+    let split = if game > 0 && style > 0 { format!(" ({} about how the game runs, {} about names and layout)", game, style) } else { String::new() };
+    format!("lint: {}{} warning(s), {} hint(s){}, {} auto-fixable (sijoc lint for details)", errs, w, h, split, fixable)
+}
+
+/// The lint summary of build/run/check: the counts, then the most important findings first (game
+/// rules and correctness before names and layout), each on one line, so that the few that change
+/// what the game does or how fast it runs are not lost among hundreds of naming hints.
+fn print_lint_summary(sm: &SourceMap, ds: &[crate::lint::LintDiag], quiet: bool) {
+    if ds.is_empty() {
+        return;
+    }
+    let bad = ds.iter().any(|d| d.level == Level::Error);
+    if quiet && !bad {
+        return;
+    }
+    let mut text = format!("{}\n", lint_summary(ds));
+    let imp = |d: &crate::lint::LintDiag| crate::lint::importance(d.code);
+    let mut top: Vec<&crate::lint::LintDiag> = ds.iter().filter(|d| d.level == Level::Error || (d.level == Level::Warning && imp(d) >= 1) || imp(d) >= 3).collect();
+    let rank = |d: &crate::lint::LintDiag| (d.level != Level::Error, std::cmp::Reverse(crate::lint::importance(d.code)), d.level != Level::Warning, d.span.lo);
+    top.sort_by_key(|d| rank(d));
+    const SHOWN: usize = 5;
+    for d in top.iter().take(SHOWN) {
+        let (file, line, _) = sm.position(d.span.lo);
+        let lvl = match d.level {
+            Level::Error => "error",
+            Level::Warning => "warning",
+            Level::Hint => "hint",
+        };
+        text.push_str(&format!("  {}[{}] {}:{}: {}\n", lvl, d.code, file, line, d.msg));
+    }
+    if top.len() > SHOWN {
+        text.push_str(&format!("  ... and {} more (sijoc lint)\n", top.len() - SHOWN));
+    }
+    emit(if bad { Level::Error } else { Level::Hint }, &text);
 }
 
 /// The `.sijolint` that applies to `path`, the same way for every command: an error (unknown rule,
@@ -298,6 +462,7 @@ fn lint_cmd(sm: SourceMap, args: &[String]) -> i32 {
             "--preset" if i + 1 < args.len() => {
                 cfg.preset = match args[i + 1].as_str() {
                     "dotnet" | "csharp" => crate::lint::Preset::Dotnet,
+                    "game" => crate::lint::Preset::Game,
                     _ => crate::lint::Preset::Standard,
                 };
                 i += 1;
@@ -337,9 +502,10 @@ fn lint_cmd(sm: SourceMap, args: &[String]) -> i32 {
     print_lint(&sm, &ds);
     if total_fixed > 0 {
         let what = if sm.files.len() == 1 { path.clone() } else { format!("{} files", sm.files.len()) };
-        eprintln!("applied {} fix(es) to {}", total_fixed, what);
+        println!("applied {} fix(es) to {}", total_fixed, what);
     }
-    eprintln!("{}", lint_summary(&ds).replace(" (sijoc lint for details)", ""));
+    let bad_lint = ds.iter().any(|d| d.level == Level::Error);
+    emit(if bad_lint { Level::Error } else { Level::Hint }, &format!("{}\n", lint_summary(&ds).replace(" (sijoc lint for details)", "")));
     let bad = ds.iter().any(|d| d.level == Level::Error) || (deny && ds.iter().any(|d| d.level == Level::Warning));
     if bad {
         1
@@ -414,14 +580,32 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
     }
-    let compiled = compile_tuned(&src, &mut diags, &Options::default(), &tune);
-    print_diags(&sm, &diags);
+    // --quiet: only errors from sijoc itself (a `run` also passes it on to the program)
+    let quiet = rest.iter().take_while(|a| *a != "--").any(|a| a == "--quiet");
+    let config = match project_config(&inputs) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 2;
+        }
+    };
+    let lib = rest.iter().take_while(|a| *a != "--").any(|a| a == "--lib" || a == "--host" || a == "wasm32");
+    let compiled = compile_tuned(&src, &mut diags, &Options { order: config.order.clone(), lib, ..Options::default() }, &tune);
+    print_diags_q(&sm, &diags, quiet && cmd != "check");
     let Some(c) = compiled else { return 1 };
+    let unknown = crate::ecs::unknown_order_entries(&c.prog, &c.ecs);
+    if !unknown.is_empty() {
+        let names: Vec<&str> = c.ecs.systems.iter().filter(|s| matches!(s.kind, crate::ecs::SysKind::Entity | crate::ecs::SysKind::Client)).map(|s| s.name.as_str()).collect();
+        eprintln!("error: sijo.toml: `order` names {} that has no systems (systems: {})", unknown.iter().map(|x| format!("'{}'", x)).collect::<Vec<_>>().join(", "), names.join(", "));
+        return 2;
+    }
     // options
     let mut out_c: Option<PathBuf> = None;
     let mut exe: Option<PathBuf> = None;
     let mut cc = std::env::var("CC").unwrap_or_else(|_| "gcc".into());
     let mut openmp = true;
+    let mut cc_given = false;
+    let mut wasm = false;
     let mut prog_args: Vec<String> = vec![];
     let mut cx = CcOpts::default();
     let mut i = 0;
@@ -429,7 +613,7 @@ pub fn main(args: &[String]) -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--lib" => cx.lib = true,
-            "--checked" | "--no-egraph" | "--profile-fields" | "--open-tables" => {} // handled before compiling
+            "--checked" | "--no-egraph" | "--profile-fields" | "--open-tables" | "--accept-schedule" => {} // handled before compiling
             // the device compiler keeps IEEE single precision without contraction; GCC's offload
             // compilers do not support Ubuntu's default -fcf-protection
             "--gpu" => cx.cflags.extend(["-fcf-protection=none".to_string(), "-foffload-options=-ffp-contract=off -fcf-protection=none".to_string()]),
@@ -471,9 +655,23 @@ pub fn main(args: &[String]) -> i32 {
             }
             "--cc" if i + 1 < args.len() => {
                 cc = args[i + 1].clone();
+                cc_given = true;
+                i += 1;
+            }
+            "--target" if i + 1 < args.len() => {
+                match args[i + 1].as_str() {
+                    "wasm32" | "wasm" => wasm = true,
+                    "native" => {}
+                    other => {
+                        eprintln!("error: unknown --target '{}' (wasm32, or native: the default)", other);
+                        return 2;
+                    }
+                }
                 i += 1;
             }
             "--no-openmp" => openmp = false,
+            // sijoc's own output; a run also passes it on (the program's --quiet)
+            "--quiet" if cmd != "run" => {}
             "--" => {
                 prog_args.extend(args[i + 1..].iter().cloned());
                 break;
@@ -488,7 +686,7 @@ pub fn main(args: &[String]) -> i32 {
         "check" => {
             print_lint(&sm, &lints);
             if !lints.is_empty() {
-                eprintln!("{}", lint_summary(&lints));
+                emit(if lints.iter().any(|d| d.level == Level::Error) { Level::Error } else { Level::Hint }, &format!("{}\n", lint_summary(&lints)));
             }
             // a rule the .sijolint raises to `error` fails the command, as `sijoc lint` does
             if lints.iter().any(|d| d.level == Level::Error) {
@@ -508,9 +706,8 @@ pub fn main(args: &[String]) -> i32 {
             0
         }
         "build" | "run" => {
-            if !lints.is_empty() {
-                eprintln!("{}", lint_summary(&lints));
-            }
+            print_lint_summary(&sm, &lints, quiet);
+            schedule_baseline(&c, &inputs, rest.iter().any(|a| a == "--accept-schedule"), quiet);
             if lints.iter().any(|d| d.level == Level::Error) {
                 print_lint(&sm, &lints.iter().filter(|d| d.level == Level::Error).cloned().collect::<Vec<_>>());
                 return 1;
@@ -520,6 +717,19 @@ pub fn main(args: &[String]) -> i32 {
             } else {
                 sm.name()
             };
+            if wasm {
+                if cmd == "run" {
+                    eprintln!("error: a wasm32 build runs in a browser or node: sijoc build {} --target wasm32, then open index.html", inputs.join(" "));
+                    return 2;
+                }
+                let stem = if inputs.len() == 1 && Path::new(&inputs[0]).is_dir() {
+                    std::fs::canonicalize(&inputs[0]).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| sm.name())
+                } else {
+                    sm.name()
+                };
+                let prefix = cx.prefix.clone().unwrap_or_else(|| crate::codegen::DEFAULT_LIB_PREFIX.to_string());
+                return build_wasm(&c, path, &sm, out_c, &stem, &prefix, if cc_given { &cc } else { "clang" }, &cx, quiet);
+            }
             // host functions must come from somewhere: say so instead of a raw linker error
             let externs: Vec<String> = c.prog.funcs.iter().filter_map(|f| f.extern_name.clone()).collect();
             if !externs.is_empty() && cx.host.is_empty() && !(cx.lib && exe.is_none()) && !cx.ldflags.iter().any(|f| f.ends_with(".o") || f.ends_with(".a") || f.starts_with("-l")) {
@@ -555,7 +765,9 @@ pub fn main(args: &[String]) -> i32 {
                     return 2;
                 }
                 if cx.host.is_empty() && exe.is_none() {
-                    println!("wrote {} and {} (embed: call {p}_create / {p}_step from your engine)", out_c.display(), h.display(), p = prefix);
+                    if !quiet {
+                        println!("wrote {} and {} (embed: call {p}_create / {p}_step from your engine)", out_c.display(), h.display(), p = prefix);
+                    }
                     return 0;
                 }
                 cx.cflags.push(format!("-I{}", h.parent().map(|d| d.display().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| ".".into())));
@@ -569,7 +781,9 @@ pub fn main(args: &[String]) -> i32 {
                 }
             }
             if cmd == "build" {
-                println!("wrote {} and {}", out_c.display(), exe.display());
+                if !quiet {
+                    println!("wrote {} and {}", out_c.display(), exe.display());
+                }
                 return 0;
             }
             let status = Command::new(&exe).args(&prog_args).status();
@@ -586,6 +800,158 @@ pub fn main(args: &[String]) -> i32 {
         }
         _ => usage(),
     }
+}
+
+/// Where the schedule baseline of a build lives: `.sijo/schedule` in the project's directory (the
+/// one with sijo.toml, or the directory given, or the first file's directory).
+fn baseline_path(inputs: &[String]) -> Option<PathBuf> {
+    let first = Path::new(inputs.first()?);
+    let dir = if first.is_dir() {
+        first.to_path_buf()
+    } else {
+        project_root(first).unwrap_or_else(|| first.parent().map(|d| if d.as_os_str().is_empty() { PathBuf::from(".") } else { d.to_path_buf() }).unwrap_or_else(|| PathBuf::from(".")))
+    };
+    let stem = if first.is_dir() || project_root(first).is_some() { "schedule".to_string() } else { format!("{}.schedule", first.file_stem()?.to_string_lossy()) };
+    Some(dir.join(".sijo").join(stem))
+}
+
+/// One line per entity system: `name<TAB>parallel` or `name<TAB>serial<TAB>why`.
+pub fn schedule_lines(c: &Compiled) -> Vec<(String, bool, String)> {
+    c.ecs.systems.iter().filter(|s| s.kind == crate::ecs::SysKind::Entity).map(|s| (s.name.clone(), s.parallel, s.why_serial.join("; "))).collect()
+}
+
+/// Compares this build's schedule with the baseline the previous builds left and warns about every
+/// entity system that ran in parallel there and now runs serially (an extern call, a Print or a
+/// Spawn added in passing can do that without anything else changing). A regression stays in the
+/// baseline as parallel, so every build says so until it is fixed or `--accept-schedule` records the
+/// new schedule; any other change (new systems, serial to parallel) is recorded silently.
+fn schedule_baseline(c: &Compiled, inputs: &[String], accept: bool, quiet: bool) {
+    let Some(path) = baseline_path(inputs) else { return };
+    let now = schedule_lines(c);
+    let old: Vec<(String, bool)> = std::fs::read_to_string(&path)
+        .map(|t| {
+            t.lines()
+                .filter(|l| !l.starts_with('#'))
+                .filter_map(|l| {
+                    let mut it = l.split('\t');
+                    Some((it.next()?.to_string(), it.next()? == "parallel"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut regressed: Vec<&(String, bool, String)> = vec![];
+    for x in &now {
+        if !x.1 && old.iter().any(|(n, par)| *n == x.0 && *par) {
+            regressed.push(x);
+        }
+    }
+    if !quiet {
+        for (name, _, why) in &regressed {
+            println!("schedule: {} ran in parallel in the baseline and now runs serially{}: {}", name, if accept { " (accepted)" } else { "" }, why);
+        }
+        if !regressed.is_empty() && !accept {
+            println!("  (baseline {}; fix the cause, or build with --accept-schedule to record the new schedule)", path.display());
+        }
+    }
+    let mut text = String::from("# sijoc schedule baseline: entity systems and whether they run in parallel (written by build/run)\n");
+    for (name, par, why) in &now {
+        // a regression keeps its old entry until it is accepted
+        let keep_par = !accept && regressed.iter().any(|r| r.0 == *name);
+        if *par || keep_par {
+            text.push_str(&format!("{}\tparallel\n", name));
+        } else {
+            text.push_str(&format!("{}\tserial\t{}\n", name, why));
+        }
+    }
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&path, text);
+    }
+}
+
+/// `sijoc build --target wasm32`: <dir>/<stem>.c, the header, <stem>.wasm (clang, no C library:
+/// runtime/sijo_wasm.h), <stem>.js (the loader) and, the first time, index.html (a page that runs
+/// the game). Without -o the directory is `<stem>_web`.
+#[allow(clippy::too_many_arguments)]
+fn build_wasm(c: &Compiled, path: &str, sm: &SourceMap, out_c: Option<PathBuf>, stem: &str, prefix: &str, cc: &str, cx: &CcOpts, quiet: bool) -> i32 {
+    let out_c = out_c.unwrap_or_else(|| PathBuf::from(format!("{}_web", stem)).join(format!("{}.c", stem)));
+    let dir = out_c.parent().map(|d| if d.as_os_str().is_empty() { PathBuf::from(".") } else { d.to_path_buf() }).unwrap_or_else(|| PathBuf::from("."));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("error: cannot create {}: {}", dir.display(), e);
+        return 2;
+    }
+    let base = out_c.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| stem.to_string());
+    let cname = out_c.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    crate::consteval::WASM.store(true, std::sync::atomic::Ordering::Relaxed);
+    let csrc = crate::codegen::generate_full(c, path, sm, &cname, true, prefix);
+    crate::consteval::WASM.store(false, std::sync::atomic::Ordering::Relaxed);
+    let h = dir.join(format!("{}.h", prefix));
+    let wasm = dir.join(format!("{}.wasm", base));
+    let js = dir.join(format!("{}.js", base));
+    for (f, text) in [(&out_c, csrc), (&h, crate::codegen::embed_header(c, prefix)), (&js, crate::wasm::loader(c, prefix, &base))] {
+        if let Err(e) = std::fs::write(f, text) {
+            eprintln!("error: cannot write {}: {}", f.display(), e);
+            return 2;
+        }
+    }
+    let page = dir.join("index.html");
+    let wrote_page = !page.exists();
+    if wrote_page {
+        if let Err(e) = std::fs::write(&page, crate::wasm::page(&base)) {
+            eprintln!("error: cannot write {}: {}", page.display(), e);
+            return 2;
+        }
+    }
+    // the C library is sijo_wasm.h: no libc, no WASI; host functions are imports from "env"
+    let mut a: Vec<String> = vec![
+        "--target=wasm32".into(),
+        "-std=gnu11".into(),
+        "-ffp-contract=off".into(),
+        "-w".into(),
+        "-nostdlib".into(),
+        "-mbulk-memory".into(),
+        "-mnontrapping-fptoint".into(),
+        "-fno-builtin-malloc".into(),
+        "-fno-builtin-calloc".into(),
+        "-fno-builtin-realloc".into(),
+        "-fno-builtin-free".into(),
+        if cx.debug { "-O0".into() } else { "-O2".into() },
+    ];
+    if cx.debug {
+        a.push("-g".into());
+    }
+    a.extend(cx.cflags.iter().cloned());
+    a.extend(["-Wl,--no-entry", "-Wl,--export-dynamic", "-Wl,--allow-undefined", "-Wl,--export=__stack_pointer", "-Wl,-z,stack-size=8388608"].iter().map(|x| x.to_string()));
+    a.extend(cx.ldflags.iter().cloned());
+    a.push(out_c.display().to_string());
+    a.push("-o".into());
+    a.push(wasm.display().to_string());
+    match Command::new(cc).args(&a).output() {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!("error: wasm compilation failed ({} --target=wasm32):
+{}", cc, String::from_utf8_lossy(&o.stderr));
+            return 3;
+        }
+        Err(e) => {
+            eprintln!("error: cannot run '{}': {} (the wasm32 target needs clang with wasm-ld, e.g. clang and lld packages; or --cc PATH)", cc, e);
+            return 3;
+        }
+    }
+    if !quiet {
+        println!(
+            "wrote {} {} {} {}{}",
+            out_c.display(),
+            h.display(),
+            wasm.display(),
+            js.display(),
+            if wrote_page { format!(" {}", page.display()) } else { String::new() }
+        );
+        println!("  serve {} over HTTP (python3 -m http.server -d {}) and open index.html; or in node: (await import(\"./{}.js\")).load()", dir.display(), dir.display(), base);
+    }
+    0
 }
 
 /// extra C build options: embedding / host program / debug builds

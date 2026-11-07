@@ -29,6 +29,7 @@
                               │
                               ▼
                백엔드: C11 생성 (#line으로 .sijo 줄 연결) ─▶ gcc/clang -O2 (+OpenMP)
+                                                         또는 clang --target=wasm32 (C 라이브러리 = sijo_wasm.h)
                               │
                               ▼
                     네이티브 실행 파일 + explain 보고서
@@ -60,7 +61,11 @@ Mojo(MLIR), Unity Burst(LLVM), Jai의 접근과 같은 분업입니다. Sijo 컴
 | 값 범위 | e-graph의 e-클래스 분석으로 구간을 추적. 근거: 범위 타입(모든 쓰기가 포화하므로 읽은 값은 범위 안), 불변 지역 변수(초기화 식의 구간, 불변 지역 변수만 읽는 정의는 펼쳐서 `a + K + 1 - a`를 상수로), `for` 카운터(시작값 ≤ i < 상한), 배열 길이(`new T[N]`은 길이가 바뀌지 않음; 다차원 배열 지역 변수 `new T[W, H]`는 원소를 써도 통째로 바꾸지 않는 한 차원마다 길이가 그대로), 컬렉션 길이 ≥ 0. 쓰임: 비교·조건 결정(`if (Hp > 100)` 제거), 포화 제거 또는 한쪽만 남기기(`Hp -= 7` → 아래 끝만), 0 이상인 값의 `% 2^k`·`/ 2^k` → 마스크·시프트, `Math.Abs/Min/Max/Clamp` 결정, 인덱스 구간이 배열 안이면 경계 검사 제거. 결과가 정확하려면 계약이 모든 입구에서 지켜져야 하므로 필드 기본값·상태 불러오기·클라이언트 복원·RPC 인자도 포화함 |
 | 분기 제거 | 조건이 상수인 `if`/`while(false)`/삼항 |
 | 죽은 필드 제거 | 어떤 코드도 읽지 않는 엔티티 필드를 저장소·복제에서 제거. 소스에 적힌 대로의 읽기로 판단하므로(최적화가 읽기를 없애도 저장소는 남음) 저장되는 월드와 체크섬은 최적화의 강도와 무관 |
-| 경계 검사 제거 | `for (i = 0; i < xs.Count; i++)`에서 `xs`가 루프 내 불변이면 `xs[i]` 검사 생략. 다차원 배열은 첨자마다: `for (x = 0; x < g.GetLength(0); x++)` 안의 `g[x, ..]`는 0번 차원 검사만 생략(다른 차원의 첨자는 따로 증명) |
+| 경계 검사 제거 | `for (i = 0; i < xs.Count; i++)`에서 `xs`가 루프 내 불변이면 `xs[i]` 검사 생략. `xs`는 지역 변수, 이 엔티티의 필드, **핸들이나 쿼리 커서로 읽는 다른 엔티티의 필드**(`wd.G`: 시스템 안에서 다른 엔티티는 시작 시점 값이고 그 리스트는 직접 바꿀 수 없으므로 핸들 변수가 바뀌지 않는 한 그대로). 다른 엔티티의 리스트는 루프 앞에서 한 번 C 지역 변수로 읽어 두므로, 루프 안에서 extern을 불러도 C 컴파일러가 데이터 포인터·길이를 다시 읽지 않고 핸들 조회도 한 번입니다. 고정 길이 배열 필드(`int[K.N] F`)는 `i < N`(N ≤ 길이)까지 도는 루프도: 루프 앞에서 길이를 한 번 확인하고 원소 검사를 지움. 다차원 배열은 첨자마다: `for (x = 0; x < g.GetLength(0); x++)` 안의 `g[x, ..]`는 0번 차원 검사만 생략(다른 차원의 첨자는 따로 증명). 남은 검사와 이유는 `explain`의 `[bounds checks]` |
+| 배열 필드 기본값 | `public int[] G = new int[90000];`은 0으로 채운 할당 한 번(기본값이 0이 아닌 원소 타입은 루프 하나), 원소마다 대입문을 만들지 않음 |
+| 격자 연산 | `Step`·`Move`의 람다를 칸 루프로 펼침: 맵은 제자리, 스텐실은 두 번째 버퍼와 검사 없는 내부, 이동은 칸마다 제안 해결. 바깥 축을 스레드로 나눔, 람다 안의 `Random`은 칸 키 (4.13절, `src/grid.rs`, `src/codegen_grid.rs`) |
+| 난수 키 | `Random` 키 `mix(mix(mix(seed^tick)^entity)^(site,ctr))` 중 엔티티·틱 부분을 그 엔티티의 첫 뽑기에 한 번 계산해 두고 뽑기마다 한 번만 섞음(같은 수, 배열을 쓰는 루프에서 2배) |
+| `[Deferred]` extern | 호출을 인자와 함께 명령 버퍼에 쌓고 스테이지 끝에 명령 순서대로 실행(`SIJO_CMD_HOST`), 샤드에서는 코디네이터만 (1.11절) |
 | 쿼리 단형화 | `Query<T>()` 루프를 아키타입별로 복제, 루프 변수를 커서로 |
 | 테이블 사이의 메서드 공유 | 한 클래스의 조합 테이블들, 한 컴포넌트가 있는 테이블들에서 메서드를 한 번만 컴파일. 자기 행은 뷰(`SijoView_N`: 열 포인터와 아키타입 번호, 시스템 루프마다 한 번)로 닿음. 16조합을 넘는 클래스는 컴포넌트 비트를 가진 열린 테이블 하나(4.4.1절) |
 | 샤드 계획 | 시스템마다 분할·복제·코디네이터 실행, 컴포넌트마다 다른 샤드가 읽는 곳(모든 샤드·코디네이터·증명된 반경의 헤일로), 스테이지를 생성 합치기로 나눌 곳. 정확한 컴포넌트 코덱과 주인 행 필터를 생성(5.7절, `explain`의 `[shards]`) |
@@ -130,6 +135,19 @@ Mojo(MLIR), Unity Burst(LLVM), Jai의 접근과 같은 분업입니다. Sijo 컴
   barriers per tick: 4 (RPCs at the start) (one per stage)
 ```
 
+`[systems]`의 직렬 이유는 원인을 이름으로 말합니다(`prints (output order)`, `calls host function(s) Host.Shake ...`, 핸들을 쓰는 Spawn). 끝의 두 절은 루프 안의 비용을 보여 줍니다.
+
+```
+[grids] cell-parallel operations (Step, Move, Ray)
+  World.Update: line 20 (2D grid): Step: map (each cell from itself), in place, cells in parallel; Random keyed by the cell
+  World.Update: line 29 (2D grid): Step: stencil (reads neighbours at offsets up to 1 x 1), into a second buffer, cells in parallel; 4 read(s) without bounds checks away from the edges
+[bounds checks] 5 removed; 2 left inside loops
+  line 14: Cells.Update: `G[i]` keeps its check: the loop runs to a number, not to `G.Length`; declaring the field with its length (`int[N] G`) lets the compiler prove it
+  line 23: Cells.Update: `L[i]` keeps its check: the body changes the list's length or contents through a list method (line 22)
+```
+
+`sijoc build`/`run`은 엔티티 시스템마다 병렬 여부를 `.sijo/schedule`(프로젝트 디렉터리, 파일 하나면 그 옆의 `.sijo/<이름>.schedule`)에 남기고, 병렬이던 시스템이 직렬이 되면 다음 빌드부터 고치거나 `--accept-schedule`로 받아들일 때까지 매번 알립니다(10.1절).
+
 ## 7.6 구현 언어와 크기
 
-프로토타입 컴파일러는 Rust(표준 라이브러리만, 외부 의존성 0, 약 3.7만 줄; C 런타임 헤더 약 7,600줄)로 작성되었습니다. 런타임은 C 헤더로 생성 코드에 포함됩니다. `sijo_rt.h`는 맨 앞에 들어가는 핵심 런타임(핸들, 아레나, 명령 버퍼, 비트 패킹, 프레임 자료 구조), `sijo_str.h`는 문자열과 틱 경계 수집기, `sijo_dict.h`는 Dictionary, `sijo_grid.h`는 근접 질의 격자, `sijo_net.h`는 네트워크 런타임(UDP 전송, 네트워크 조건 시뮬레이션, 델타 코덱, 조각화, 신뢰성 있는 RPC, 실행 방식), `sijo_crypto.h`는 XChaCha20-Poly1305, `sijo_shard.h`와 `sijo_shard_net.h`는 샤드 런타임(교환·병합·헤일로·이양 / 샤드 사이 채널·체크포인트·복구), `sijo_embed.c.h`와 `sijo_game.h`는 `--lib` 임베딩 API입니다. `sijo_net.h`는 사용자 식별자를 쓰는 생성 코드가 모두 끝난 뒤에 들어갑니다. 소켓 헤더가 정의하는 소문자 매크로(`h_addr` 등)가 필드 이름을 바꿔 버리지 않게 하기 위해서입니다.
+프로토타입 컴파일러는 Rust(표준 라이브러리만, 외부 의존성 0, 약 3.9만 줄; C 런타임 헤더 약 8,300줄)로 작성되었습니다. 런타임은 C 헤더로 생성 코드에 포함됩니다. `sijo_rt.h`는 맨 앞에 들어가는 핵심 런타임(핸들, 아레나, 명령 버퍼, 비트 패킹, 프레임 자료 구조), `sijo_str.h`는 문자열과 틱 경계 수집기, `sijo_dict.h`는 Dictionary, `sijo_grid.h`는 근접 질의 격자, `sijo_net.h`는 네트워크 런타임(UDP 전송, 네트워크 조건 시뮬레이션, 델타 코덱, 조각화, 신뢰성 있는 RPC, 실행 방식), `sijo_crypto.h`는 XChaCha20-Poly1305, `sijo_shard.h`와 `sijo_shard_net.h`는 샤드 런타임(교환·병합·헤일로·이양 / 샤드 사이 채널·체크포인트·복구), `sijo_embed.c.h`와 `sijo_game.h`는 `--lib` 임베딩 API, `sijo_wasm.h`는 `--target wasm32`의 C 라이브러리(할당기, 문자열, printf 계열, 로더가 가진 파일, JS 예외로 패닉 풀기)입니다. `sijo_net.h`는 사용자 식별자를 쓰는 생성 코드가 모두 끝난 뒤에 들어갑니다. 소켓 헤더가 정의하는 소문자 매크로(`h_addr` 등)가 필드 이름을 바꿔 버리지 않게 하기 위해서입니다.

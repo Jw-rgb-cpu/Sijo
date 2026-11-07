@@ -330,7 +330,9 @@ impl Server {
         }
         let sm = SourceMap::new(files);
         let mut d = Diags::default();
-        let compiled = compile(&sm.text, &mut d);
+        // sijo.toml's `order` changes the schedule the hovers show
+        let order = root.as_ref().map(|r| crate::driver::project_config(&[r.display().to_string()]).map(|c| c.order).unwrap_or_default()).unwrap_or_default();
+        let compiled = crate::driver::compile_with(&sm.text, &mut d, &crate::driver::Options { order, ..Default::default() });
         let mut diags: Vec<Diagnostic> = d.list.clone();
         // the .sijolint that applies, as `sijoc lint/check/run` read it: an error in it is shown at
         // the top of this document (an unknown rule: the file is ignored here, the commands stop)
@@ -890,7 +892,13 @@ fn describe(a: &Analysis, sym: Sym) -> String {
                 s.push_str(&format!(
                     "\n\n**host function** (C: `{}`), defined by the program that embeds the game. {}",
                     cname,
-                    if fd.pure_attr { "Declared [Pure]: may run in parallel." } else { "Treated as an external effect: systems calling it run serially and it cannot be used inside atomic." }
+                    if fd.pure_attr {
+                        "Declared [Pure]: may run in parallel."
+                    } else if fd.deferred_attr {
+                        "Declared [Deferred]: calls are queued with their arguments and made in row order at the end of the stage, so the systems calling it stay parallel (on the client it is called at once)."
+                    } else {
+                        "Treated as an external effect: systems calling it run serially and it cannot be used inside atomic ([Deferred] on a void extern keeps them parallel)."
+                    }
                 ));
                 return s;
             }
@@ -1225,6 +1233,28 @@ fn members_of(a: &Analysis, ty: &Ty) -> Vec<Json> {
             for (n, d) in [("Length", "int".to_string()), ("Rank", "int".to_string()), ("GetLength", "int GetLength(int dimension)".to_string()), ("GetUpperBound", "int GetUpperBound(int dimension)".to_string()), ("Clone", format!("{} Clone()", tn))] {
                 v.push(item(n, if matches!(n, "Length" | "Rank") { 10 } else { 2 }, d));
             }
+            // a 2D or 3D array is a grid (docs/01 §1.14.2)
+            let rank = ty.rank();
+            if rank >= 2 {
+                let el = p.elem_of(ty).map(|e| p.ty_name(&e)).unwrap_or_default();
+                let cs = ["x", "y", "z"][..rank].join(", ");
+                let mut grid: Vec<(&str, String)> = vec![("Width", "int".into()), ("Height", "int".into())];
+                if rank == 3 {
+                    grid.push(("Depth", "int".into()));
+                }
+                grid.extend([
+                    ("InBounds", format!("bool InBounds({cs})")),
+                    ("Get", format!("{el} Get({cs}, {el} fallback)")),
+                    ("Fill", format!("void Fill({el} value)")),
+                    ("Flood", format!("int Flood({cs}, {el} value): fills the connected region of equal cells")),
+                    ("Step", format!("void Step(({cs}, c) => new value): every cell from the grid as it was, in parallel")),
+                    ("Move", format!("void Move({el} empty, ({cs}, c) => Grid.Dir(..) or Grid.Stay): cells move into free neighbours")),
+                    ("Ray", format!("int Ray({cs} from, {cs} to, c => hit): steps to the first hit, or -1")),
+                ]);
+                for (n, d) in grid {
+                    v.push(item(n, if matches!(n, "Width" | "Height" | "Depth") { 10 } else { 2 }, d));
+                }
+            }
         }
         _ => {}
     }
@@ -1300,6 +1330,7 @@ fn member_type(a: &Analysis, ty: &Ty, name: &str) -> Option<Ty> {
         }
         Ty::List(_) if name == "Count" => Some(Ty::Int),
         Ty::Array(_) | Ty::MdArray(..) if matches!(name, "Length" | "Rank" | "GetLength" | "GetUpperBound") => Some(Ty::Int),
+        Ty::MdArray(..) if matches!(name, "Width" | "Height" | "Depth" | "Flood" | "Ray") => Some(Ty::Int),
         Ty::Array(_) | Ty::MdArray(..) if name == "Clone" => Some(ty.clone()),
         Ty::Str if name == "Length" => Some(Ty::Int),
         _ => None,

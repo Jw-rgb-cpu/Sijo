@@ -7,7 +7,9 @@
 #ifndef SIJO_CRYPTO_H
 #define SIJO_CRYPTO_H
 #include <stdint.h>
+#ifndef SIJO_WASM
 #include <string.h>
+#endif
 
 static inline uint32_t sijo_c_ld32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 static inline void sijo_c_st32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }

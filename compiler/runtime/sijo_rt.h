@@ -29,7 +29,9 @@
 #if defined(_M_IX86) && (!defined(_M_IX86_FP) || _M_IX86_FP < 2)
 #error "sijo: build with /arch:SSE2 (x87 float math gives different results)"
 #endif
-#if defined(_MSC_VER) && !defined(__clang__)
+#if defined(SIJO_WASM)
+#define SIJO_TLS /* one thread */
+#elif defined(_MSC_VER) && !defined(__clang__)
 #define SIJO_TLS __declspec(thread)
 #else
 #define SIJO_TLS __thread
@@ -37,12 +39,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#ifndef SIJO_WASM /* --target wasm32: sijo_wasm.h, included before this file, is the C library */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
 #include <setjmp.h>
+#endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -1257,7 +1261,8 @@ static inline SijoList sijo_list_take(SijoList* l) {
 
 /* ---------------- deferred commands ---------------- */
 /* CADD / CREM: a component added (with its values) or removed; applied after the destroys of a flush */
-enum { SIJO_CMD_SET = 1, SIJO_CMD_ADDI, SIJO_CMD_ADDF, SIJO_CMD_CALL, SIJO_CMD_DESTROY, SIJO_CMD_CADD, SIJO_CMD_CREM };
+/* HOST: a call of a [Deferred] host function (field = its number, data = the arguments) */
+enum { SIJO_CMD_SET = 1, SIJO_CMD_ADDI, SIJO_CMD_ADDF, SIJO_CMD_CALL, SIJO_CMD_DESTROY, SIJO_CMD_CADD, SIJO_CMD_CREM, SIJO_CMD_HOST };
 typedef struct {
     SijoH target, src;
     uint16_t kind, field, off, size;
@@ -1276,6 +1281,10 @@ typedef struct {
     SijoH cur;
     uint64_t rng_ent;
     uint32_t rng_ctr;
+    /* the part of the random key that is fixed for this entity and tick, worked out at the first
+     * draw (rng_ok = 0 whenever rng_ent changes): every draw then mixes once, not three times */
+    uint32_t rng_ok;
+    uint64_t rng_base;
 } __attribute__((aligned(64))) SijoTls;
 
 static void sijo_cmdbuf_free(SijoCmdBuf* b) {
@@ -1306,7 +1315,7 @@ static uint32_t sijo_cmd_data(SijoCmdBuf* b, const void* p, uint32_t n) {
 static void sijo_cmd_append(SijoCmdBuf* dst, SijoCmdBuf* src) {
     for (int32_t i = 0; i < src->n; i++) {
         SijoCmd c = src->c[i];
-        if (c.size && (c.kind == SIJO_CMD_SET || c.kind == SIJO_CMD_CALL || c.kind == SIJO_CMD_CADD)) c.data = sijo_cmd_data(dst, src->data + c.data, c.size);
+        if (c.size && (c.kind == SIJO_CMD_SET || c.kind == SIJO_CMD_CALL || c.kind == SIJO_CMD_CADD || c.kind == SIJO_CMD_HOST)) c.data = sijo_cmd_data(dst, src->data + c.data, c.size);
         *sijo_cmd_push(dst) = c;
     }
     src->n = 0;

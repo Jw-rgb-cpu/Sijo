@@ -2,6 +2,7 @@
 //! algebraic simplification, branch elimination, bounds-check elimination.
 
 use crate::ast::{BinOp, ParamMode, UnOp};
+use crate::diag::Span;
 use crate::consteval::{self, binop};
 use crate::hir::*;
 use std::collections::{HashMap, HashSet};
@@ -68,7 +69,7 @@ pub fn optimize_with(p: &mut Program, egraph: bool) -> OptStats {
                 break;
             }
         }
-        bce_block(&mut body, &mut st);
+        bce_block(p, &mut body, &mut st);
         p.funcs[fid].body = body;
     }
     st.algebraic += st.egraph_exprs;
@@ -655,83 +656,233 @@ fn float_identity(op: BinOp, a: &Expr, b: &Expr, la: Option<&ConstVal>, lb: Opti
 enum ListRef {
     Local(LocalId),
     SelfField(FieldId),
+    /// `h.F` through a handle or query cursor held in a local: another entity's list field. A
+    /// system reads other entities as of its start, lists owned by another entity cannot be changed
+    /// in place (E0405) and writes to them are deferred, so it stays put unless `h` changes.
+    Other(LocalId, FieldId),
 }
 
 fn list_ref(e: &Expr) -> Option<ListRef> {
     match &e.kind {
         ExprKind::Local(l) => Some(ListRef::Local(*l)),
         ExprKind::EField { base, field } if matches!(base.kind, ExprKind::SelfRef) => Some(ListRef::SelfField(*field)),
+        ExprKind::EField { base, field } => match base.kind {
+            ExprKind::Local(h) => Some(ListRef::Other(h, *field)),
+            _ => None,
+        },
         _ => None,
     }
 }
 
-fn bce_block(b: &mut Block, st: &mut OptStats) {
-    // look for: Let i = <non-negative int>; Loop { cond: i < L.Count, step: i++ / i += 1 }
-    // (or i < A.GetLength(d) on a multi-dimensional array: A[.., i, ..] with i in dimension d)
-    for k in 0..b.stmts.len() {
-        let mut candidate: Option<(LocalId, ListRef, Option<usize>)> = None;
-        if k > 0 {
-            if let (Stmt::Let { local, init: Some(Expr { kind: ExprKind::Int(n), .. }) }, Stmt::Loop { cond: Some(c), step, do_while: false, .. }) =
-                (&b.stmts[k - 1], &b.stmts[k])
-            {
-                if *n >= 0 {
-                    if let ExprKind::Binary(BinOp::Lt, lhs, rhs) = &c.kind {
-                        let bound = match &rhs.kind {
-                            ExprKind::ListLen(l) => Some((&**l, None)),
-                            ExprKind::Builtin { f: Builtin::ArrayGetLength, args, .. } => match args[1].kind {
-                                ExprKind::Int(d) => Some((&args[0], Some(d as usize))),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        if let (ExprKind::Local(i), Some((l, dim))) = (&lhs.kind, bound) {
-                            let step_ok = step.len() == 1
-                                && match &step[0].kind {
-                                    ExprKind::IncDec { target, inc: true, .. } => matches!(target.kind, ExprKind::Local(x) if x == *i),
-                                    ExprKind::Assign { op: Some(BinOp::Add), target, value } => {
-                                        matches!(target.kind, ExprKind::Local(x) if x == *i) && matches!(value.kind, ExprKind::Int(1))
-                                    }
-                                    _ => false,
-                                };
-                            if *i == *local && step_ok {
-                                if let Some(lr) = list_ref(l) {
-                                    candidate = Some((*i, lr, dim));
+/// Does writing or mutating `target` change the list `lr`? Another entity's list field counts as
+/// changed by any write to that field (through `this` or any handle: the handle may name this entity).
+fn touches(target: &Expr, lr: &ListRef) -> bool {
+    match lr {
+        ListRef::Other(h, f) => {
+            matches!(&target.kind, ExprKind::EField { field, .. } if field == f) || matches!(target.kind, ExprKind::Local(x) if x == *h)
+        }
+        _ => list_ref(target).as_ref() == Some(lr),
+    }
+}
+
+/// statements that suspend a coroutine: the loop resumes on a later tick, when lists may have changed
+fn has_await(b: &Block) -> bool {
+    b.stmts.iter().any(|s| matches!(s, Stmt::Await { .. }) || s.sub_blocks().into_iter().any(has_await))
+}
+
+/// The list a counting loop `for (i = <n >= 0>; i < L.Count; i++)` (or `i < L.GetLength(d)`) runs
+/// over, when the body changes neither `i` nor `L`: `L[i]` needs no bounds check, and `L` itself can
+/// be read once before the loop (the condition reads it before the first iteration anyway).
+/// `init` is the statement before the loop. Returns (index local, the list, dimension).
+pub fn counting_loop<'a>(init: &Stmt, cond: &'a Option<Expr>, step: &[Expr], do_while: bool, body: &Block) -> Option<(LocalId, &'a Expr, Option<usize>)> {
+    let (Stmt::Let { local, init: Some(Expr { kind: ExprKind::Int(n), .. }) }, Some(c), false) = (init, cond, do_while) else { return None };
+    if *n < 0 {
+        return None;
+    }
+    let ExprKind::Binary(BinOp::Lt, lhs, rhs) = &c.kind else { return None };
+    let (l, dim) = match &rhs.kind {
+        ExprKind::ListLen(l) => (&**l, None),
+        ExprKind::Builtin { f: Builtin::ArrayGetLength, args, .. } => match args[1].kind {
+            ExprKind::Int(d) => (&args[0], Some(d as usize)),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let ExprKind::Local(i) = lhs.kind else { return None };
+    let step_ok = step.len() == 1
+        && match &step[0].kind {
+            ExprKind::IncDec { target, inc: true, .. } => matches!(target.kind, ExprKind::Local(x) if x == i),
+            ExprKind::Assign { op: Some(BinOp::Add), target, value } => matches!(target.kind, ExprKind::Local(x) if x == i) && matches!(value.kind, ExprKind::Int(1)),
+            _ => false,
+        };
+    if i != *local || !step_ok {
+        return None;
+    }
+    let lr = list_ref(l)?;
+    if loop_disturbs(body, i, &lr) {
+        return None;
+    }
+    Some((i, l, dim))
+}
+
+/// `counting_loop`, and also `for (i = 0; i < N; i++)` with a constant N over the fixed-length array
+/// field (`int[K.M] F`, M >= N) that the body indexes with `i`: the list is the first such field
+/// indexed in the body, and the last item is the declared length to verify before the loop.
+pub fn counting_loop_fixed<'a>(p: &Program, init: &Stmt, cond: &'a Option<Expr>, step: &[Expr], do_while: bool, body: &'a Block) -> Option<(LocalId, &'a Expr, Option<usize>, Option<i32>)> {
+    if let Some((i, l, d)) = counting_loop(init, cond, step, do_while, body) {
+        return Some((i, l, d, None));
+    }
+    let (Stmt::Let { local, init: Some(Expr { kind: ExprKind::Int(n0), .. }) }, Some(c), false) = (init, cond, do_while) else { return None };
+    let ExprKind::Binary(BinOp::Lt, lhs, rhs) = &c.kind else { return None };
+    let ExprKind::Local(i) = lhs.kind else { return None };
+    let bound = match &rhs.kind {
+        ExprKind::Int(n) => *n,
+        ExprKind::Const(k) => match &p.consts[*k].value {
+            Some(ConstVal::Int(n)) => *n as i64,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let step_ok = step.len() == 1
+        && match &step[0].kind {
+            ExprKind::IncDec { target, inc: true, .. } => matches!(target.kind, ExprKind::Local(x) if x == i),
+            ExprKind::Assign { op: Some(BinOp::Add), target, value } => matches!(target.kind, ExprKind::Local(x) if x == i) && matches!(value.kind, ExprKind::Int(1)),
+            _ => false,
+        };
+    if i != *local || *n0 < 0 || !step_ok {
+        return None;
+    }
+    // the first fixed-length field indexed by the counter
+    let mut found: Option<&'a Expr> = None;
+    fn find<'b>(b: &'b Block, i: LocalId, p: &Program, out: &mut Option<&'b Expr>) {
+        for s in &b.stmts {
+            let mut es: Vec<&'b Expr> = vec![];
+            match s {
+                Stmt::Let { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) => es.push(e),
+                Stmt::If { cond, .. } => es.push(cond),
+                Stmt::Loop { cond: Some(c), .. } => es.push(c),
+                _ => {}
+            }
+            for e in es {
+                visit_ref(e, &mut |x: &'b Expr| {
+                    if out.is_some() {
+                        return;
+                    }
+                    if let ExprKind::ListIndex { list, index, .. } = &x.kind {
+                        if matches!(index.kind, ExprKind::Local(y) if y == i) {
+                            if let ExprKind::EField { field, base } = &list.kind {
+                                if p.fields[*field].fixed_len.is_some() && matches!(base.kind, ExprKind::SelfRef | ExprKind::Local(_)) {
+                                    *out = Some(&**list);
                                 }
                             }
                         }
                     }
-                }
+                });
+            }
+            for sb in s.sub_blocks() {
+                find(sb, i, p, out);
             }
         }
-        if let Some((i, lr, dim)) = candidate {
-            if let Stmt::Loop { body, .. } = &mut b.stmts[k] {
-                if !loop_disturbs(body, i, &lr) {
-                    let n = match dim {
-                        None => unchecked_indexes(body, i, &lr),
-                        Some(d) => unchecked_md_indexes(body, i, &lr, d),
-                    };
-                    st.bounds_checks_removed += n;
-                }
+    }
+    find(body, i, p, &mut found);
+    let l = found?;
+    let ExprKind::EField { field, .. } = &l.kind else { return None };
+    let n = p.fields[*field].fixed_len?;
+    if bound > n as i64 {
+        return None;
+    }
+    let lr = list_ref(l)?;
+    if loop_disturbs(body, i, &lr) {
+        return None;
+    }
+    Some((i, l, None, Some(n)))
+}
+
+/// visits `e` and its sub-expressions with references that live as long as `e`
+fn visit_ref<'b>(e: &'b Expr, f: &mut dyn FnMut(&'b Expr)) {
+    f(e);
+    for c in children_ref(e) {
+        visit_ref(c, f);
+    }
+}
+
+fn children_ref(e: &Expr) -> Vec<&Expr> {
+    crate::sema::children(e)
+}
+
+/// Why a counting loop over a list keeps the bounds checks of `L[i]` (for `sijoc explain`), or None
+/// when it is not a loop of that shape.
+pub fn loop_check_reason(init: Option<&Stmt>, cond: &Option<Expr>, step: &[Expr], do_while: bool, body: &Block) -> Option<(String, Option<Span>)> {
+    let c = cond.as_ref()?;
+    let ExprKind::Binary(op, lhs, rhs) = &c.kind else { return None };
+    let l = match &rhs.kind {
+        ExprKind::ListLen(l) => &**l,
+        ExprKind::Builtin { f: Builtin::ArrayGetLength, args, .. } => &args[0],
+        _ => return None,
+    };
+    let ExprKind::Local(i) = lhs.kind else { return None };
+    if do_while {
+        return Some(("a do-while loop runs its body before the first test".into(), None));
+    }
+    if *op != BinOp::Lt {
+        return Some((format!("the condition is `i {} length`, not `i < length`", op.sym()), None));
+    }
+    match init {
+        Some(Stmt::Let { local, init: Some(Expr { kind: ExprKind::Int(n), .. }) }) if *local == i => {
+            if *n < 0 {
+                return Some(("the counter starts below 0".into(), None));
+            }
+        }
+        _ => return Some(("the counter does not start at a constant 0 or more right before the loop".into(), None)),
+    }
+    let step_ok = step.len() == 1
+        && match &step[0].kind {
+            ExprKind::IncDec { target, inc: true, .. } => matches!(target.kind, ExprKind::Local(x) if x == i),
+            ExprKind::Assign { op: Some(BinOp::Add), target, value } => matches!(target.kind, ExprKind::Local(x) if x == i) && matches!(value.kind, ExprKind::Int(1)),
+            _ => false,
+        };
+    if !step_ok {
+        return Some(("the step is not `i++` or `i += 1`".into(), None));
+    }
+    let Some(lr) = list_ref(l) else {
+        return Some(("the list is not a local, a field of this entity or a field read through a handle or cursor held in a local".into(), None));
+    };
+    loop_disturbance(body, i, &lr)
+}
+
+fn bce_block(p: &Program, b: &mut Block, st: &mut OptStats) {
+    // look for: Let i = <non-negative int>; Loop { cond: i < L.Count, step: i++ / i += 1 }
+    // (or i < A.GetLength(d) on a multi-dimensional array: A[.., i, ..] with i in dimension d)
+    for k in 1..b.stmts.len() {
+        let (before, after) = b.stmts.split_at_mut(k);
+        if let Stmt::Loop { cond, step, body, do_while } = &mut after[0] {
+            let found = counting_loop_fixed(p, &before[k - 1], cond, step, *do_while, body).map(|(i, l, dim, _)| (i, list_ref(l).unwrap(), dim));
+            if let Some((i, lr, dim)) = found {
+                let n = match dim {
+                    None => unchecked_indexes(body, i, &lr),
+                    Some(d) => unchecked_md_indexes(body, i, &lr, d),
+                };
+                st.bounds_checks_removed += n;
             }
         }
     }
     for s in b.stmts.iter_mut() {
         match s {
             Stmt::If { then, els, .. } => {
-                bce_block(then, st);
+                bce_block(p, then, st);
                 if let Some(e) = els {
-                    bce_block(e, st);
+                    bce_block(p, e, st);
                 }
             }
             Stmt::Loop { body, .. } | Stmt::Block(body) | Stmt::Atomic { body, .. } | Stmt::ForQuery { body, .. } | Stmt::ForList { body, .. } => {
-                bce_block(body, st)
+                bce_block(p, body, st)
             }
             Stmt::Switch { sections, default, .. } => {
                 for (_, x) in sections.iter_mut() {
-                    bce_block(x, st);
+                    bce_block(p, x, st);
                 }
                 if let Some(x) = default {
-                    bce_block(x, st);
+                    bce_block(p, x, st);
                 }
             }
             _ => {}
@@ -741,53 +892,64 @@ fn bce_block(b: &mut Block, st: &mut OptStats) {
 
 /// Can the loop body change the index `i` or the length of the list `lr`? (then `lr[i]` keeps its check)
 fn loop_disturbs(body: &Block, i: LocalId, lr: &ListRef) -> bool {
-    let mut bad = false;
+    loop_disturbance(body, i, lr).is_some()
+}
+
+/// What in the loop body may change the index `i` or the list `lr`, if anything
+fn loop_disturbance(body: &Block, i: LocalId, lr: &ListRef) -> Option<(String, Option<Span>)> {
+    if has_await(body) {
+        return Some(("the body awaits (the loop resumes on a later tick)".into(), None));
+    }
+    let mut why: Option<(String, Option<Span>)> = None;
     let is_i = |x: Option<&Expr>| matches!(x.map(|x| &x.kind), Some(ExprKind::Local(x)) if *x == i);
-    crate::sema::visit_block(body, &mut |e| match &e.kind {
-        ExprKind::Assign { target, .. } | ExprKind::IncDec { target, .. } => {
-            if is_i(Some(target)) {
-                bad = true;
-            }
-            if list_ref(target).as_ref() == Some(lr) {
-                bad = true;
-            }
+    crate::sema::visit_block(body, &mut |e| {
+        if why.is_some() {
+            return;
         }
-        ExprKind::ListCall { list, op, .. } => {
-            if op.mutates() && list_ref(list).as_ref() == Some(lr) {
-                bad = true;
+        match &e.kind {
+            ExprKind::Assign { target, .. } | ExprKind::IncDec { target, .. } => {
+                if is_i(Some(target)) {
+                    why = Some(("the body changes the counter".into(), Some(e.span)));
+                } else if touches(target, lr) {
+                    why = Some(("the body assigns the list".into(), Some(e.span)));
+                }
             }
-        }
-        // xs.RemoveAll(x => ...) / xs.Sort((a, b) => ...)
-        ExprKind::ListLambda { list, op, .. } => {
-            if op.mutates() && list_ref(list).as_ref() == Some(lr) {
-                bad = true;
+            ExprKind::ListCall { list, op, .. } => {
+                if op.mutates() && touches(list, lr) {
+                    why = Some(("the body changes the list's length or contents through a list method".into(), Some(e.span)));
+                }
             }
-        }
-        // int.TryParse(s, out i) / d.TryGetValue(k, out i) write their out argument
-        ExprKind::Builtin { f: Builtin::TryParseInt | Builtin::TryParseFloat, args, .. } | ExprKind::DictCall { op: DictOp::TryGet, args, .. } => {
-            if is_i(args.get(1)) {
-                bad = true;
+            // xs.RemoveAll(x => ...) / xs.Sort((a, b) => ...)
+            ExprKind::ListLambda { list, op, .. } => {
+                if op.mutates() && touches(list, lr) {
+                    why = Some(("the body changes the list through a list method".into(), Some(e.span)));
+                }
             }
-        }
-        ExprKind::Call { args, dispatch, .. } => {
-            for a in args {
-                if matches!(a.mode, ParamMode::Ref | ParamMode::Out) {
-                    if is_i(Some(&a.expr)) || list_ref(&a.expr).as_ref() == Some(lr) {
-                        bad = true;
+            // int.TryParse(s, out i) / d.TryGetValue(k, out i) write their out argument
+            ExprKind::Builtin { f: Builtin::TryParseInt | Builtin::TryParseFloat, args, .. } | ExprKind::DictCall { op: DictOp::TryGet, args, .. } => {
+                if is_i(args.get(1)) {
+                    why = Some(("the body writes the counter through `out`".into(), Some(e.span)));
+                }
+            }
+            ExprKind::Call { args, dispatch, .. } => {
+                for a in args {
+                    if matches!(a.mode, ParamMode::Ref | ParamMode::Out) && (is_i(Some(&a.expr)) || touches(&a.expr, lr)) {
+                        why = Some(("the body passes the counter or the list by `ref`/`out`".into(), Some(e.span)));
+                    }
+                    // the list moves into an `own` parameter (it is empty afterwards)
+                    if a.mode == ParamMode::Own && touches(&a.expr, lr) {
+                        why = Some(("the body moves the list into an `own` parameter".into(), Some(e.span)));
                     }
                 }
-                // the list moves into an `own` parameter (it is empty afterwards)
-                if a.mode == ParamMode::Own && list_ref(&a.expr).as_ref() == Some(lr) {
-                    bad = true;
+                if matches!(lr, ListRef::SelfField(_) | ListRef::Other(..)) && matches!(dispatch, Dispatch::SelfCall | Dispatch::BaseCall) {
+                    // a self method could modify the list field
+                    why = Some(("the body calls a method of this entity, which may change the field".into(), Some(e.span)));
                 }
             }
-            if matches!(lr, ListRef::SelfField(_)) && matches!(dispatch, Dispatch::SelfCall | Dispatch::BaseCall) {
-                bad = true; // a self method could modify the list field
-            }
+            _ => {}
         }
-        _ => {}
     });
-    bad
+    why
 }
 
 fn unchecked_indexes(body: &mut Block, i: LocalId, lr: &ListRef) -> usize {
@@ -863,7 +1025,12 @@ pub fn children_mut(e: &mut Expr) -> Vec<&mut Expr> {
         ExprKind::Is { expr, .. } => vec![&mut **expr],
         ExprKind::ListClone { list, .. } => vec![&mut **list],
         ExprKind::ArrayNew { len, elems, dims, .. } => len.iter_mut().map(|l| &mut **l).chain(dims.iter_mut()).chain(elems.iter_mut()).collect(),
-        ExprKind::ListLambda { list, body, .. } => vec![&mut **list, &mut **body],
+        ExprKind::ListLambda { list, body, args, .. } => {
+            let mut v: Vec<&mut Expr> = vec![&mut **list];
+            v.extend(args.iter_mut());
+            v.push(&mut **body);
+            v
+        }
         ExprKind::ListIndex { list, index, .. } => vec![&mut **list, &mut **index],
         ExprKind::MdIndex { idx, .. } => idx.iter_mut().collect(),
         ExprKind::ListCall { list, args, .. } => {

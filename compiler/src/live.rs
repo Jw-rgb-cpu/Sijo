@@ -37,7 +37,7 @@ impl Builder {
         let src = sm.text.clone();
         let mut d = Diags::default();
         let shown = self.src_path.display().to_string();
-        let Some(c) = crate::driver::compile_with(&src, &mut d, &crate::driver::Options { dev: true }) else {
+        let Some(c) = crate::driver::compile_with(&src, &mut d, &crate::driver::Options { dev: true, order: crate::driver::project_config(&self.inputs).map(|c| c.order).unwrap_or_default(), lib: false }) else {
             for x in &d.list {
                 eprint!("{}", sm.render(x));
             }

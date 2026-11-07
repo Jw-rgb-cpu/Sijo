@@ -59,7 +59,8 @@ pub fn array_type_rank(name: &str) -> usize {
 }
 
 const FIELD_ATTRS: &[&str] = &["Precision", "Replicated", "NotReplicated", "Spatial", "Component", "Persistent", "PersistentKey"];
-const METHOD_ATTRS: &[&str] = &["Pure", "Recursive"];
+const METHOD_ATTRS: &[&str] = &["Pure", "Recursive", "Deferred"];
+const TYPE_ATTRS: &[&str] = &["Order"];
 
 const KEYWORDS: &[&str] = &[
     "if", "else", "while", "do", "for", "foreach", "in", "return", "break", "continue", "new", "this", "base", "true",
@@ -527,6 +528,7 @@ impl<'a> Parser<'a> {
             let allowed = match what {
                 "field" => FIELD_ATTRS,
                 "method" => METHOD_ATTRS,
+                "type" => TYPE_ATTRS,
                 _ => &[],
             };
             if !allowed.contains(&name) {
@@ -542,7 +544,7 @@ impl<'a> Parser<'a> {
                         "E0029",
                         a.span,
                         format!("unknown attribute [{}]", name),
-                        "fields take [Precision(p)], [Replicated], [NotReplicated], [Spatial], [Component(\"Name\")]; methods take [Pure], [Recursive]",
+                        "fields take [Precision(p)], [Replicated], [NotReplicated], [Spatial], [Component(\"Name\")]; methods take [Pure], [Recursive], [Deferred]; entity classes take [Order(n)]",
                     );
                 }
                 continue;
@@ -561,12 +563,15 @@ impl<'a> Parser<'a> {
                     _ => true,
                 },
                 "Component" => !matches!(a.args.as_slice(), [Expr { kind: ExprKind::Str(_), .. }]),
+                // [Order(n)] / [Order(-n)]: checked when the class is declared
+                "Order" => a.args.len() != 1,
                 _ => !a.args.is_empty(),
             };
             if bad_args {
                 let msg = match name {
                     "Precision" => "[Precision(p)] takes one positive number: the step replicated values are rounded to, e.g. [Precision(0.01)]".to_string(),
                     "Component" => "[Component(\"Name\")] takes one string: the name of the component".to_string(),
+                    "Order" => "[Order(n)] takes one integer: smaller numbers run first, e.g. [Order(-1)]".to_string(),
                     _ => format!("[{}] takes no arguments", name),
                 };
                 self.err("E0029", a.span, msg);
@@ -735,9 +740,27 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
-        let ret = self.type_expr();
+        let mut ret = self.type_expr();
+        // `int[K.N] Cells;`: a fixed-length array field (the length is a constant expression)
+        let mut fixed_len: Option<Expr> = None;
+        if self.is_punct("[") && !self.is_punct_at(1, "]") && !self.is_punct_at(1, ",") {
+            let s0 = self.span();
+            self.bump();
+            let len = self.expr();
+            self.expect_punct("]");
+            let end = self.prev_span();
+            ret = Self::array_of(ret, &[1], start, end);
+            ret.span = s0.to(end);
+            fixed_len = Some(len);
+        }
+        let fixed_err = |me: &mut Self, what: &str| {
+            if let Some(l) = &fixed_len {
+                me.err_note("E0019", l.span, format!("a length in the type applies to array fields, not to {}", what), "declare an entity field: public mut int[K.N] Cells; (for a local, write new int[K.N])");
+            }
+        };
         // operator
         if self.is_kw("operator") {
+            fixed_err(self, "operators");
             let op_span = self.bump().span;
             let op = match self.peek().clone() {
                 Tok::Punct(p) => {
@@ -779,6 +802,7 @@ impl<'a> Parser<'a> {
         }
         if self.is_punct("(") {
             self.check_attrs(&attrs, "method");
+            fixed_err(self, "method results");
             let params = self.params();
             let constraints = self.where_clauses();
             let expr_body = self.is_punct("=>");
@@ -803,6 +827,7 @@ impl<'a> Parser<'a> {
         if self.is_punct("=>") {
             // expression-bodied get-only property
             self.check_attrs(&attrs, "method");
+            fixed_err(self, "properties");
             let body = self.method_body();
             decl.members.push(Member::Method(MethodDecl {
                 attrs,
@@ -854,14 +879,23 @@ impl<'a> Parser<'a> {
             "field"
         };
         self.check_attrs(&attrs, what);
-        let init = if self.eat_punct("=") { Some(self.init_expr(Some(&ret))) } else { None };
-        decl.members.push(Member::Field(FieldDecl { attrs: attrs.clone(), mods: mods.clone(), ty: ret.clone(), name, init, span: nsp }));
+        if what != "field" || decl.kind == DeclKind::Struct {
+            fixed_err(self, if mods.is_const { "constants" } else { "struct members" });
+            fixed_len = None;
+        }
+        let mut init = if self.eat_punct("=") { Some(self.init_expr(Some(&ret))) } else { None };
+        // without an initializer a fixed-length array starts with its length of default elements
+        if let (None, Some(l)) = (&init, &fixed_len) {
+            let elem = ret.args.first().cloned().unwrap_or_else(|| ret.clone());
+            init = Some(Expr { kind: ExprKind::NewArray { elem, rank: 1, lens: vec![l.clone()], elems: None, shape: vec![] }, span: l.span });
+        }
+        decl.members.push(Member::Field(FieldDecl { attrs: attrs.clone(), mods: mods.clone(), ty: ret.clone(), name, init, span: nsp, fixed_len: fixed_len.clone() }));
         while self.is_punct(",") {
             let csp = self.bump().span;
             let (n2, s2) = self.expect_name();
             self.err_note("E0030", csp.to(s2), format!("declare '{}' in its own declaration", n2), "a declaration declares one field or variable: write each on its own line");
             let init = if self.eat_punct("=") { Some(self.init_expr(Some(&ret))) } else { None };
-            decl.members.push(Member::Field(FieldDecl { attrs: attrs.clone(), mods: mods.clone(), ty: ret.clone(), name: n2, init, span: s2 }));
+            decl.members.push(Member::Field(FieldDecl { attrs: attrs.clone(), mods: mods.clone(), ty: ret.clone(), name: n2, init, span: s2, fixed_len: None }));
         }
         self.expect_punct(";");
     }
@@ -1055,6 +1089,17 @@ impl<'a> Parser<'a> {
             self.split_shr();
             self.expect_punct(">");
         }
+        // Grid<T> / Grid3<T>: the built-in 2D / 3D grid is the array T[,] / T[,,] (its methods Step,
+        // Move, Flood, Ray... are those of 2D and 3D arrays)
+        let (name, args) = match (name.as_str(), args.len()) {
+            ("Grid", 1) | ("Grid3", 1) => {
+                let rank = if name == "Grid" { 2 } else { 3 };
+                let el = args.into_iter().next().unwrap();
+                let at = Self::array_of(el, &[rank], start, self.prev_span());
+                (at.name, at.args)
+            }
+            _ => (name, args),
+        };
         let nullable = self.eat_punct("?");
         let mut t = TypeExpr { name, args, nullable, range: None, span: start.to(self.prev_span()) };
         // T[] (T[][]: an array of arrays), T[,], T[,,]
@@ -2361,6 +2406,19 @@ impl<'a> Parser<'a> {
                     }
                     let ty = self.type_expr();
                     let args = if self.is_punct("(") { Some(self.args()) } else { None };
+                    // new Grid<T>(w, h) / new Grid3<T>(w, h, d): new T[w, h] / new T[w, h, d]
+                    let rank = array_type_rank(&ty.name);
+                    if rank >= 2 {
+                        if let Some(a) = &args {
+                            if a.len() != rank {
+                                let which = if rank == 2 { "Grid<T>(width, height)" } else { "Grid3<T>(width, height, depth)" };
+                                self.err_note("E0241", start.to(self.prev_span()), format!("a {}D grid takes {} sizes", rank, rank), format!("write new {}; Grid<T> is 2D, Grid3<T> 3D", which));
+                            }
+                            let lens: Vec<Expr> = a.iter().map(|x| x.expr.clone()).collect();
+                            let elem = ty.args.first().cloned().unwrap_or_else(|| ty.clone());
+                            return Expr { kind: ExprKind::NewArray { elem, rank, lens, elems: None, shape: vec![] }, span: start.to(self.prev_span()) };
+                        }
+                    }
                     let coll = matches!(ty.name.as_str(), "List" | "Sijo.List" | "Dictionary" | "Sijo.Dictionary");
                     if coll && self.eat_punct("{") {
                         let mut items = vec![];

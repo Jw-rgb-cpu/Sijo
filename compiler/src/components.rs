@@ -189,7 +189,7 @@ pub fn expand(p: &mut Program, d: &mut Diags, force_open: bool) {
             Some(f) => f,
             None => {
                 let span = p.classes[c].span;
-                p.fields.push(EField { name: "__comps".into(), class: c, is_mut: true, ty: Ty::Int, init: None, attrs: FieldAttrs { replicated: Some(true), ..Default::default() }, span });
+                p.fields.push(EField { fixed_len: None, name: "__comps".into(), class: c, is_mut: true, ty: Ty::Int, init: None, attrs: FieldAttrs { replicated: Some(true), ..Default::default() }, span });
                 let f = p.fields.len() - 1;
                 p.classes[c].own_fields.push(f);
                 f
@@ -219,6 +219,7 @@ pub fn expand(p: &mut Program, d: &mut Diags, force_open: bool) {
                 own_fields: vec![],
                 methods: HashMap::new(), overloads: vec![],
                 order: 0,
+                run_order: p.classes[c].run_order,
             });
             made.entry(c).or_default().push(p.classes.len() - 1);
         }

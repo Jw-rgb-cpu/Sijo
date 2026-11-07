@@ -131,6 +131,8 @@ pub struct Checker<'a> {
     /// type parameters, quiet), then verified constant
     inst_efield_inits: Vec<(ClassId, FieldId, ast::Expr, Vec<(String, Ty)>, bool)>,
     inst_efield_checks: Vec<(FieldId, Span)>,
+    /// `int[K.N] F`: the length expressions, evaluated once the constants are known
+    fixed_lens: Vec<(FieldId, ast::Expr, TypeRef)>,
     /// `delegate R Name(...)` declarations: name -> delegate type (its signature is filled when
     /// pass 3 starts)
     named_delegates: HashMap<String, DelegateId>,
@@ -225,7 +227,10 @@ struct SwitchCheck {
     span: Span,
 }
 
-const NAMESPACES: &[&str] = &["Math", "Draw", "Random", "Time", "string", "String", "int", "float", "char", "Array", "Net"];
+const NAMESPACES: &[&str] = &["Math", "Draw", "Random", "Time", "string", "String", "int", "float", "char", "Array", "Net", "Grid"];
+/// the methods of a 2D or 3D array, a grid (Grid<T> is T[,], Grid3<T> is T[,,]); `Grid` is a
+/// built-in name only while the program declares no type of that name (Grid.Dir, Grid.Stay)
+const GRID_METHODS: &[&str] = &["InBounds", "Get", "Fill", "Flood", "Step", "Move", "Ray"];
 
 /// what entities do with components: `e.Add(new C { ... })`, `e.Remove<C>()`, `e.Has<C>()`, `e.Get<C>()`
 const COMP_OPS: &[&str] = &["Add", "Remove", "Has", "Get"];
@@ -312,10 +317,15 @@ fn method_extent(md: &ast::MethodDecl) -> Span {
 }
 
 fn check_with(file: &ast::File, d: &mut Diags, dry: Option<&[(String, Span)]>) -> Program {
-    let mut c = Checker { p: Program::default(), const_src: HashMap::new(), local_consts: vec![], d, types: HashMap::new(), consts: HashMap::new(), st: None, switch_checks: vec![], await_edges: vec![], rush_funcs: vec![], templates: HashMap::new(), tmpls: vec![], tenv: vec![], inst_queue: vec![], quiet: false, stemplates: HashMap::new(), stmpls: vec![], struct_inst: HashMap::new(), inst_field_inits: vec![], inst_field_checks: vec![], itemplates: HashMap::new(), itmpls: vec![], iface_inst: HashMap::new(), iface_pending: vec![], members_open: false, defaults_open: false, default_src: HashMap::new(), ctemplates: HashMap::new(), ctmpls: vec![], class_inst: HashMap::new(), pending_members: vec![], members_ready: false, class_checks_done: false, inst_efield_inits: vec![], inst_efield_checks: vec![], named_delegates: HashMap::new(), delegate_decls: vec![], dg_class: None, lambda_count: HashMap::new(), static_ok: false, inst_const_inits: vec![], dry: vec![], dry_force: false };
+    let mut c = Checker { p: Program::default(), const_src: HashMap::new(), local_consts: vec![], d, types: HashMap::new(), consts: HashMap::new(), st: None, switch_checks: vec![], await_edges: vec![], rush_funcs: vec![], templates: HashMap::new(), tmpls: vec![], tenv: vec![], inst_queue: vec![], quiet: false, stemplates: HashMap::new(), stmpls: vec![], struct_inst: HashMap::new(), inst_field_inits: vec![], inst_field_checks: vec![], itemplates: HashMap::new(), itmpls: vec![], iface_inst: HashMap::new(), iface_pending: vec![], members_open: false, defaults_open: false, default_src: HashMap::new(), ctemplates: HashMap::new(), ctmpls: vec![], class_inst: HashMap::new(), pending_members: vec![], members_ready: false, class_checks_done: false, inst_efield_inits: vec![], inst_efield_checks: vec![], fixed_lens: vec![], named_delegates: HashMap::new(), delegate_decls: vec![], dg_class: None, lambda_count: HashMap::new(), static_ok: false, inst_const_inits: vec![], dry: vec![], dry_force: false };
     c.dry = dry.map(|v| v.iter().map(|(_, sp)| *sp).collect()).unwrap_or_default();
     c.run(file);
     c.p
+}
+
+/// `[Order(n)]` is checked once per generic class: on its first instance
+fn quiet_order(k: usize) -> bool {
+    k == 0
 }
 
 fn attr<'b>(attrs: &'b [ast::Attr], name: &str) -> Option<&'b ast::Attr> {
@@ -337,7 +347,7 @@ impl<'a> Checker<'a> {
         // declaration order of classes (instances of a generic class sort right after it)
         let mut entity_order = 0;
         for decl in &file.items {
-            if self.types.contains_key(&decl.name) || self.named_delegates.contains_key(&decl.name) || self.stemplates.contains_key(&decl.name) || self.itemplates.contains_key(&decl.name) || self.ctemplates.contains_key(&decl.name) || NAMESPACES.contains(&decl.name.as_str()) || decl.name == "Entity" {
+            if self.types.contains_key(&decl.name) || self.named_delegates.contains_key(&decl.name) || self.stemplates.contains_key(&decl.name) || self.itemplates.contains_key(&decl.name) || self.ctemplates.contains_key(&decl.name) || (NAMESPACES.contains(&decl.name.as_str()) && decl.name != "Grid") || decl.name == "Entity" {
                 self.d.error("E0102", decl.span, format!("duplicate or reserved type name '{}'", decl.name));
                 continue;
             }
@@ -428,6 +438,7 @@ impl<'a> Checker<'a> {
                         self.d.error_note("E0264", sp, format!("component '{}' cannot derive from anything", decl.name), "components are combined on an entity at run time instead: e.Add(new A { ... }); e.Add(new B { ... });");
                     }
                     let is_entity = iface || comp || !decl.mods.is_static;
+                    let run_order = self.order_attr(&decl.attrs, is_entity && !iface, true);
                     self.p.classes.push(ClassDef {
                         name: decl.name.clone(),
                         span: decl.span,
@@ -443,6 +454,7 @@ impl<'a> Checker<'a> {
                         own_fields: vec![],
                         methods: HashMap::new(), overloads: vec![],
                         order: entity_order * ORDER_STRIDE,
+                        run_order,
                     });
                     entity_order += 1;
                     TypeRef::Class(self.p.classes.len() - 1)
@@ -473,6 +485,7 @@ impl<'a> Checker<'a> {
                 own_fields: vec![],
                 methods: HashMap::new(), overloads: vec![],
                 order: entity_order,
+                run_order: 0,
             });
             self.p.entity_root = Some(self.p.classes.len() - 1);
         }
@@ -693,9 +706,13 @@ impl<'a> Checker<'a> {
                                 if self.p.find_field(cid, &f.name).is_some() {
                                     self.d.error("E0104", f.span, format!("duplicate field '{}' (possibly inherited)", f.name));
                                 }
-                                let attrs = self.field_attrs(&f.attrs, f.ty.range.as_ref(), &ty, f.span, tref);
-                                self.p.fields.push(EField { name: f.name.clone(), class: cid, is_mut: f.mods.is_mut, ty, init: None, attrs, span: f.span });
+                                let mut attrs = self.field_attrs(&f.attrs, f.ty.range.as_ref(), &ty, f.span, tref);
+                                attrs.public = f.mods.is_public;
+                                self.p.fields.push(EField { fixed_len: None, name: f.name.clone(), class: cid, is_mut: f.mods.is_mut, ty, init: None, attrs, span: f.span });
                                 let fid = self.p.fields.len() - 1;
+                                if let Some(l) = &f.fixed_len {
+                                    self.fixed_lens.push((fid, l.clone(), tref));
+                                }
                                 self.p.classes[cid].own_fields.push(fid);
                                 self.def(f.span, Sym::Field(fid));
                                 if let Some(e) = &f.init {
@@ -920,6 +937,35 @@ impl<'a> Checker<'a> {
         }
         for (_, he) in pending {
             self.d.error("E0221", he.span, "constant initializer is part of a dependency cycle");
+        }
+        // `int[K.N] F`: the length is a constant, and an initializer has exactly that many elements
+        for (fid, e, tref) in std::mem::take(&mut self.fixed_lens) {
+            let he = self.check_detached(tref, &e, &Ty::Int);
+            let n = match consteval::eval_expr_raw(&self.p, &he) {
+                Ok(ConstVal::Int(n)) if n >= 0 => n,
+                Ok(ConstVal::Int(n)) => {
+                    self.d.error("E0241", e.span, format!("an array cannot have {} elements", n));
+                    continue;
+                }
+                _ => {
+                    self.d.error_note("E0215", e.span, "the length of a fixed-length array field must be a constant", "write a number or a const: public mut int[K.CELLS] Cells;");
+                    continue;
+                }
+            };
+            self.p.fields[fid].fixed_len = Some(n);
+            let init_len = match self.p.fields[fid].init.as_ref().map(|x| &x.kind) {
+                Some(ExprKind::ArrayNew { len: Some(l), .. }) => match consteval::eval_expr_raw(&self.p, l) {
+                    Ok(ConstVal::Int(m)) => Some((m as i64, l.span)),
+                    _ => None,
+                },
+                Some(ExprKind::ArrayNew { len: None, elems, .. }) => Some((elems.len() as i64, self.p.fields[fid].init.as_ref().unwrap().span)),
+                _ => None,
+            };
+            if let Some((m, sp)) = init_len {
+                if m != n as i64 {
+                    self.d.error_note("E0241", sp, format!("'{}' is declared with {} elements, but its initializer has {}", self.p.fields[fid].name, n, m), "give the initializer the declared length, or leave it out (the elements start with their default)");
+                }
+            }
         }
         field_checks.extend(std::mem::take(&mut self.inst_field_checks).into_iter().map(|(s, i, sp)| (TypeRef::Struct(s), i, sp)));
         field_checks.extend(std::mem::take(&mut self.inst_efield_checks).into_iter().map(|(f, sp)| (TypeRef::Class(self.p.fields[f].class), f, sp)));
@@ -1818,10 +1864,20 @@ impl<'a> Checker<'a> {
         }
         for &l in &f.params {
             let loc = &f.locals[l];
-            let ok_ty = matches!(loc.ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Enum(_) | Ty::Str);
+            // an array or list of numbers is lent to the host as a pointer and a length (C: `const
+            // int32_t* xs, int32_t xs_len`), like a string: read-only and only during the call
+            let scalar = |t: &Ty| matches!(t, Ty::Int | Ty::Float | Ty::Bool | Ty::Enum(_) | Ty::Char);
+            let ok_ty = matches!(loc.ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Enum(_) | Ty::Str)
+                || matches!(&loc.ty, Ty::Array(e) | Ty::List(e) if scalar(e));
             if !ok_ty || !matches!(loc.kind, LocalKind::Param(ParamMode::Value)) {
-                why.push(format!("parameter '{}' must be a plain int, float, bool, enum or string", loc.name));
+                why.push(format!("parameter '{}' must be a plain int, float, bool, enum, string, or an array or list of int, float, bool, char or enum", loc.name));
             }
+        }
+        if f.deferred_attr && f.ret != Ty::Void {
+            why.push("[Deferred] needs a void extern: its calls are made later, at the end of the system, so nothing can wait for a result".into());
+        }
+        if f.deferred_attr && f.pure_attr {
+            why.push("[Deferred] and [Pure] do not go together: a pure function has no effects to queue".into());
         }
         if !why.is_empty() {
             self.d.error_note("E0254", md.name_span, format!("invalid extern function '{}'", md.name), why.join("; "));
@@ -1951,6 +2007,7 @@ impl<'a> Checker<'a> {
             body: Block::default(),
             ctx: if client { Ctx::Client } else { Ctx::Server },
             pure_attr: attr(&md.attrs, "Pure").is_some(),
+            deferred_attr: attr(&md.attrs, "Deferred").is_some(),
             is_property: md.is_property,
             is_override: md.mods.is_override,
             is_abstract: md.mods.is_abstract && md.body.is_none(),
@@ -2156,6 +2213,7 @@ impl<'a> Checker<'a> {
             own_fields: vec![],
             methods: HashMap::new(), overloads: vec![],
             order,
+            run_order: 0,
             is_component: false,
             combo_of: None,
             comps: vec![],
@@ -2745,6 +2803,7 @@ impl<'a> Checker<'a> {
         let decl = self.ctmpls[ti].decl.clone();
         let k = self.ctmpls[ti].instances.len();
         let is_static = decl.mods.is_static;
+        let run_order = self.order_attr(&decl.attrs, !is_static, quiet_order(k));
         self.p.classes.push(ClassDef {
             name: format!("{}<{}>", tname, labels.join(", ")),
             span: decl.span,
@@ -2757,6 +2816,7 @@ impl<'a> Checker<'a> {
             own_fields: vec![],
             methods: HashMap::new(), overloads: vec![],
             order: self.ctmpls[ti].order + 1 + k,
+            run_order,
             is_component: false,
             combo_of: None,
             comps: vec![],
@@ -2949,9 +3009,13 @@ impl<'a> Checker<'a> {
                     if self.p.find_field(cid, &f.name).is_some() {
                         self.d.error("E0104", f.span, format!("duplicate field '{}' (possibly inherited)", f.name));
                     }
-                    let attrs = self.field_attrs(&f.attrs, f.ty.range.as_ref(), &ty, f.span, tref);
-                    self.p.fields.push(EField { name: f.name.clone(), class: cid, is_mut: f.mods.is_mut, ty, init: None, attrs, span: f.span });
+                    let mut attrs = self.field_attrs(&f.attrs, f.ty.range.as_ref(), &ty, f.span, tref);
+                    attrs.public = f.mods.is_public;
+                    self.p.fields.push(EField { fixed_len: None, name: f.name.clone(), class: cid, is_mut: f.mods.is_mut, ty, init: None, attrs, span: f.span });
                     let fid = self.p.fields.len() - 1;
+                    if let Some(l) = &f.fixed_len {
+                        self.fixed_lens.push((fid, l.clone(), tref));
+                    }
                     self.p.classes[cid].own_fields.push(fid);
                     self.def(f.span, Sym::Field(fid));
                     if let Some(e) = &f.init {
@@ -3469,7 +3533,7 @@ impl<'a> Checker<'a> {
 
     /// A hidden (never replicated) field of entity class `c`, as `this.<name>`.
     fn hidden_field(&mut self, c: ClassId, name: String, ty: Ty, sp: Span) -> Expr {
-        self.p.fields.push(EField { name, class: c, is_mut: true, ty: ty.clone(), init: None, attrs: FieldAttrs { replicated: Some(false), ..Default::default() }, span: sp });
+        self.p.fields.push(EField { fixed_len: None, name, class: c, is_mut: true, ty: ty.clone(), init: None, attrs: FieldAttrs { replicated: Some(false), ..Default::default() }, span: sp });
         let fid = self.p.fields.len() - 1;
         self.p.classes[c].own_fields.push(fid);
         Expr::new(ExprKind::EField { base: Box::new(Expr::new(ExprKind::SelfRef, Ty::Handle(c), sp)), field: fid }, ty, sp)
@@ -3662,7 +3726,7 @@ impl<'a> Checker<'a> {
         let fname = self.p.funcs[fid].name.clone();
         let sp = md.name_span;
         let new_field = |me: &mut Self, name: String, ty: Ty| -> FieldId {
-            me.p.fields.push(EField { name, class: c, is_mut: true, ty, init: None, attrs: FieldAttrs { replicated: Some(false), ..Default::default() }, span: sp });
+            me.p.fields.push(EField { fixed_len: None, name, class: c, is_mut: true, ty, init: None, attrs: FieldAttrs { replicated: Some(false), ..Default::default() }, span: sp });
             let id = me.p.fields.len() - 1;
             me.p.classes[c].own_fields.push(id);
             id
@@ -3727,6 +3791,36 @@ impl<'a> Checker<'a> {
         let he = self.coerce(he, ty);
         self.st = None;
         he
+    }
+
+    /// `[Order(n)]` on an entity class (n an integer literal): where its systems run among the
+    /// systems of other classes. `allowed`: the declaration is an entity class or component;
+    /// `report`: say what is wrong (once for a generic class)
+    fn order_attr(&mut self, attrs: &[ast::Attr], allowed: bool, report: bool) -> i64 {
+        let Some(a) = attr(attrs, "Order") else { return 0 };
+        if !allowed {
+            if report {
+                self.d.error_note("E0029", a.span, "[Order(n)] applies to entity classes and components", "it orders the systems (Update and coroutines) a class has among the systems of other classes");
+            }
+            return 0;
+        }
+        let v = match a.args.as_slice() {
+            [ast::Expr { kind: ast::ExprKind::Int(n), .. }] => Some(*n),
+            [ast::Expr { kind: ast::ExprKind::Unary(ast::UnOp::Neg, x), .. }] => match x.kind {
+                ast::ExprKind::Int(n) => Some(-n),
+                _ => None,
+            },
+            _ => None,
+        };
+        match v {
+            Some(n) => n,
+            None => {
+                if report {
+                    self.d.error_note("E0029", a.span, "[Order(n)] takes one integer literal", "smaller numbers run first: [Order(-1)] before the default 0, [Order(10)] after it");
+                }
+                0
+            }
+        }
     }
 
     fn def(&mut self, sp: Span, sym: Sym) {
@@ -5708,6 +5802,7 @@ impl<'a> Checker<'a> {
                     ("Math", "PI") => Some(ConstVal::Float(std::f32::consts::PI)),
                     ("Math", "E") => Some(ConstVal::Float(std::f32::consts::E)),
                     ("Math", "Tau") => Some(ConstVal::Float(std::f32::consts::TAU)),
+                    ("Grid", "Stay") => Some(ConstVal::Int(0)),
                     _ => None,
                 };
                 match c {
@@ -5829,6 +5924,14 @@ impl<'a> Checker<'a> {
                 if name == "Length" {
                     // the number of elements (of all dimensions)
                     return Expr::new(ExprKind::ListLen(Box::new(hb)), Ty::Int, sp);
+                }
+                // a grid's sizes: Width = GetLength(0), Height = GetLength(1), Depth = GetLength(2)
+                if let Some(d) = ["Width", "Height", "Depth"].iter().position(|x| *x == name) {
+                    let rank = hb.ty.rank();
+                    if rank >= 2 && d < rank {
+                        let k = Expr::new(ExprKind::Int(d as i64), Ty::Int, sp);
+                        return Expr::new(ExprKind::Builtin { f: Builtin::ArrayGetLength, args: vec![hb, k], site: 0 }, Ty::Int, sp);
+                    }
                 }
                 if name == "Rank" {
                     let r = Expr::new(ExprKind::Int(hb.ty.rank() as i64), Ty::Int, sp);
@@ -6479,6 +6582,7 @@ impl<'a> Checker<'a> {
                         );
                         Expr::err(sp)
                     }
+                    Ty::MdArray(_, r) if GRID_METHODS.contains(&name.as_str()) && r >= 2 => self.grid_call(hb, name, args, sp, *nsp),
                     Ty::MdArray(..) => {
                         self.d.error_note(
                             "E0101",
@@ -6834,6 +6938,153 @@ impl<'a> Checker<'a> {
         len
     }
 
+    /// The methods of a grid (a 2D or 3D array, docs/01 §1.14.2): InBounds, Get, Fill, Flood, and the
+    /// cell-parallel Step, Move and Ray whose lambda the code generator inlines (src/grid.rs).
+    fn grid_call(&mut self, g: Expr, name: &str, args: &[ast::Arg], sp: Span, nsp: Span) -> Expr {
+        let rank = g.ty.rank();
+        let el = self.p.elem_of(&g.ty).unwrap_or(Ty::Error);
+        let scalar = matches!(el, Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Enum(_));
+        let coords = ["x", "y", "z"];
+        let cs = coords[..rank].join(", ");
+        let ints = |me: &mut Self, xs: &[ast::Arg]| -> Vec<Expr> {
+            xs.iter()
+                .map(|a| {
+                    let x = me.expr(&a.expr, Some(&Ty::Int));
+                    me.coerce(x, &Ty::Int)
+                })
+                .collect()
+        };
+        let usage = |what: &str| -> String {
+            match what {
+                "InBounds" => format!("InBounds({})", cs),
+                "Get" => format!("Get({}, fallback)", cs),
+                "Fill" => "Fill(value)".into(),
+                "Flood" => format!("Flood({}, value)", cs),
+                "Step" => format!("Step(({}, c) => new value of the cell)", cs),
+                "Move" => format!("Move(empty, ({}, c) => Grid.Dir(..) or Grid.Stay)", cs),
+                _ => format!("Ray({}, {}, c => hit)", coords[..rank].iter().map(|c| format!("{}0", c)).collect::<Vec<_>>().join(", "), coords[..rank].iter().map(|c| format!("{}1", c)).collect::<Vec<_>>().join(", ")),
+            }
+        };
+        let wrong = |me: &mut Self| {
+            me.d.error_note("E0241", sp, format!("'{}' on a {}D grid takes other arguments", name, rank), format!("write {}", usage(name)));
+            Expr::err(sp)
+        };
+        match name {
+            "InBounds" => {
+                if args.len() != rank {
+                    return wrong(self);
+                }
+                let mut a = vec![g];
+                a.extend(ints(self, args));
+                Expr::new(ExprKind::Builtin { f: Builtin::GridInBounds, args: a, site: 0 }, Ty::Bool, sp)
+            }
+            "Get" => {
+                if args.len() != rank + 1 {
+                    return wrong(self);
+                }
+                let mut a = vec![g];
+                a.extend(ints(self, &args[..rank]));
+                let fb = self.expr(&args[rank].expr, Some(&el));
+                a.push(self.coerce(fb, &el));
+                Expr::new(ExprKind::Builtin { f: Builtin::GridGet, args: a, site: 0 }, el, sp)
+            }
+            "Fill" => {
+                if args.len() != 1 {
+                    return wrong(self);
+                }
+                self.check_assignable(&g);
+                let v = self.expr(&args[0].expr, Some(&el));
+                let v = self.coerce(v, &el);
+                Expr::new(ExprKind::ListCall { list: Box::new(g), op: ListOp::Fill, args: vec![v] }, Ty::Void, sp)
+            }
+            "Flood" => {
+                if args.len() != rank + 1 {
+                    return wrong(self);
+                }
+                if !scalar {
+                    self.d.error_note("E0239", sp, "Flood needs cells of a number, bool, char or enum type", "it compares cells with the start cell");
+                    return Expr::err(sp);
+                }
+                self.check_assignable(&g);
+                let mut a = ints(self, &args[..rank]);
+                let v = self.expr(&args[rank].expr, Some(&el));
+                a.push(self.coerce(v, &el));
+                Expr::new(ExprKind::ListCall { list: Box::new(g), op: ListOp::GridFlood, args: a }, Ty::Int, sp)
+            }
+            "Step" | "Move" | "Ray" => {
+                let (op, nlead, ncoord) = match name {
+                    "Step" => (LamOp::GridStep, 0, rank),
+                    "Move" => (LamOp::GridMove, 1, rank),
+                    _ => (LamOp::GridRay, 2 * rank, 0),
+                };
+                if args.len() != nlead + 1 {
+                    return wrong(self);
+                }
+                if op != LamOp::GridStep && !scalar {
+                    self.d.error_note("E0239", sp, format!("{} needs cells of a number, bool, char or enum type", name), "it compares cells (with the empty value, or the hit test reads them)");
+                    return Expr::err(sp);
+                }
+                if op != LamOp::GridRay {
+                    self.check_assignable(&g);
+                }
+                let lead: Vec<Expr> = match op {
+                    LamOp::GridMove => {
+                        let e = self.expr(&args[0].expr, Some(&el));
+                        vec![self.coerce(e, &el)]
+                    }
+                    LamOp::GridRay => ints(self, &args[..nlead]),
+                    _ => vec![],
+                };
+                let la = &args[nlead];
+                let ast::ExprKind::Lambda { params: ps, body } = &la.expr.kind else {
+                    self.d.error_note("E0241", la.expr.span, format!("'{}' expects a lambda", name), format!("write {}", usage(name)));
+                    return Expr::err(sp);
+                };
+                if ps.len() != ncoord + 1 {
+                    self.d.error_note("E0241", la.expr.span, format!("the lambda of '{}' takes {} parameter(s)", name, ncoord + 1), format!("write {}", usage(name)));
+                    return Expr::err(sp);
+                }
+                self.push_scope();
+                let mut params = vec![];
+                for (i, (ty, n, psp)) in ps.iter().enumerate() {
+                    let want = if i < ncoord { Ty::Int } else { el.clone() };
+                    if let Some(t) = ty {
+                        let tt = self.resolve_type(t);
+                        if tt != want && tt != Ty::Error {
+                            let (a, b) = (self.p.ty_name(&tt), self.p.ty_name(&want));
+                            self.d.error("E0200", *psp, format!("lambda parameter '{}' is declared '{}' but is '{}'", n, a, b));
+                        }
+                    }
+                    params.push(self.declare_local(n, want, LocalKind::ListElem, *psp));
+                }
+                let b = match &**body {
+                    ast::LambdaBody::Expr(x) => self.expr(x, None),
+                    ast::LambdaBody::Block(bl) => match bl.stmts.as_slice() {
+                        [ast::Stmt::Return { value: Some(x), .. }] => self.expr(x, None),
+                        _ => {
+                            self.d.error_note("E0241", bl.span, "this lambda must compute a value: write '(..) => expression' or '{ return expression; }'", "use ?:, switch expressions and helper functions for the cases");
+                            Expr::err(sp)
+                        }
+                    },
+                };
+                self.pop_scope();
+                if b.ty == Ty::Error {
+                    return Expr::err(sp);
+                }
+                let (b, ret) = match op {
+                    LamOp::GridStep => (self.coerce(b, &el), Ty::Void),
+                    LamOp::GridMove => (self.coerce(b, &Ty::Int), Ty::Void),
+                    _ => (self.coerce(b, &Ty::Bool), Ty::Int),
+                };
+                Expr::new(ExprKind::ListLambda { list: Box::new(g), op, params, body: Box::new(b), site: usize::MAX, args: lead }, ret, sp)
+            }
+            _ => {
+                self.d.error("E0101", nsp, format!("a grid has no method '{}'", name));
+                Expr::err(sp)
+            }
+        }
+    }
+
     /// Array.Sort / Reverse / IndexOf / Fill / Copy (a list operation on the array)
     fn array_call(&mut self, name: &str, args: &[ast::Arg], sp: Span, nsp: Span) -> Expr {
         let Some(first) = args.first() else {
@@ -7028,6 +7279,7 @@ impl<'a> Checker<'a> {
             other => other.clone(),
         };
         let (body, ret) = match op {
+            LamOp::GridStep | LamOp::GridMove | LamOp::GridRay => unreachable!("grid operations go through grid_call"),
             LamOp::Sort => (self.coerce(body, &Ty::Int), Ty::Void),
             LamOp::Exists | LamOp::All => (self.coerce(body, &Ty::Bool), Ty::Bool),
             LamOp::RemoveAll | LamOp::Count | LamOp::FindIndex | LamOp::FindLastIndex => (self.coerce(body, &Ty::Bool), Ty::Int),
@@ -7074,7 +7326,7 @@ impl<'a> Checker<'a> {
         } else {
             usize::MAX
         };
-        Expr::new(ExprKind::ListLambda { list: Box::new(list), op, params, body: Box::new(body), site }, ret, sp)
+        Expr::new(ExprKind::ListLambda { list: Box::new(list), op, params, body: Box::new(body), site, args: vec![] }, ret, sp)
     }
 
     fn next_site(&mut self) -> usize {
@@ -7091,6 +7343,32 @@ impl<'a> Checker<'a> {
     fn builtin_call(&mut self, ns: &str, name: &str, args: &[ast::Arg], sp: Span, nsp: Span) -> Expr {
         if ns == "Array" {
             return self.array_call(name, args, sp, nsp);
+        }
+        if ns == "Grid" {
+            if name != "Dir" || !(2..=3).contains(&args.len()) {
+                self.d.error_note("E0101", nsp, format!("'Grid.{}' does not exist", name), "Grid.Dir(dx, dy) / Grid.Dir(dx, dy, dz) (each -1, 0 or 1) is a move direction for Move, Grid.Stay none");
+                return Expr::err(sp);
+            }
+            let mut hs: Vec<Expr> = vec![];
+            for a in args {
+                let x = self.expr(&a.expr, Some(&Ty::Int));
+                hs.push(self.coerce(x, &Ty::Int));
+            }
+            if hs.len() == 2 {
+                hs.push(Expr::new(ExprKind::Int(0), Ty::Int, sp));
+            }
+            // a constant direction is a number at compile time
+            let ks: Vec<Option<i64>> = hs.iter().map(|h| if let ExprKind::Int(k) = h.kind { Some(k) } else { None }).collect();
+            if ks.iter().all(|k| k.is_some()) {
+                let v: Vec<i64> = ks.into_iter().map(|k| k.unwrap()).collect();
+                if v.iter().any(|k| !(-1..=1).contains(k)) {
+                    self.d.error_note("E0241", sp, "a direction moves at most one cell along each axis", "each of dx, dy, dz is -1, 0 or 1");
+                    return Expr::err(sp);
+                }
+                let code = if v.iter().all(|k| *k == 0) { 0 } else { 1 + (v[0] + 1) + 3 * (v[1] + 1) + 9 * (v[2] + 1) };
+                return Expr::new(ExprKind::Int(code), Ty::Int, sp);
+            }
+            return Expr::new(ExprKind::Builtin { f: Builtin::GridDir, args: hs, site: 0 }, Ty::Int, sp);
         }
         if matches!((ns, name), ("int" | "float", "TryParse")) {
             let (f, vt) = if ns == "int" { (Builtin::TryParseInt, Ty::Int) } else { (Builtin::TryParseFloat, Ty::Float) };
@@ -7565,6 +7843,7 @@ impl<'a> Checker<'a> {
                     methods: HashMap::new(),
                     overloads: vec![],
                     order: usize::MAX / 2,
+                    run_order: 0,
                 });
                 let c = self.p.classes.len() - 1;
                 self.dg_class = Some(c);
@@ -7587,6 +7866,7 @@ impl<'a> Checker<'a> {
             body: Block::default(),
             ctx: Ctx::Server,
             pure_attr: false,
+            deferred_attr: false,
             is_property: false,
             is_override: false,
             is_abstract: false,
@@ -7798,6 +8078,7 @@ impl<'a> Checker<'a> {
             body: hb,
             ctx: Ctx::Server,
             pure_attr: false,
+            deferred_attr: false,
             is_property: false,
             is_override: false,
             is_abstract: false,
@@ -7953,6 +8234,7 @@ impl<'a> Checker<'a> {
                     body,
                     ctx: Ctx::Server,
                     pure_attr: false,
+            deferred_attr: false,
                     is_property: false,
                     is_override: false,
                     is_abstract: false,
@@ -8905,6 +9187,29 @@ pub fn visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
+/// A fixed-length array field (`int[K.N] F`) keeps its length: it cannot be moved into an `own`
+/// parameter (that leaves it empty) or passed by `ref`/`out` (the callee could store another array).
+pub fn check_fixed_len_args(p: &Program, d: &mut Diags) {
+    for f in &p.funcs {
+        visit_block(&f.body, &mut |e| {
+            if let ExprKind::Call { args, .. } = &e.kind {
+                for a in args {
+                    if let (ParamMode::Own | ParamMode::Ref | ParamMode::Out, ExprKind::EField { field, .. }) = (a.mode, &a.expr.kind) {
+                        if let Some(n) = p.fields[*field].fixed_len {
+                            d.error_note(
+                                "E0241",
+                                a.expr.span,
+                                format!("'{}' has a fixed length ({} elements): it cannot be passed as '{}'", p.field_label(*field), n, match a.mode { ParamMode::Own => "own", ParamMode::Ref => "ref", _ => "out" }),
+                                "pass it as a plain (borrowed) argument and change its elements, or pass a copy: F.Clone()",
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
 pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     f(e);
     for c in children(e) {
@@ -8945,7 +9250,12 @@ pub fn children(e: &Expr) -> Vec<&Expr> {
         ExprKind::Is { expr, .. } => vec![expr],
         ExprKind::ListClone { list, .. } => vec![list],
         ExprKind::ArrayNew { len, elems, dims, .. } => len.iter().map(|l| &**l).chain(dims.iter()).chain(elems.iter()).collect(),
-        ExprKind::ListLambda { list, body, .. } => vec![list, body],
+        ExprKind::ListLambda { list, body, args, .. } => {
+            let mut v: Vec<&Expr> = vec![list];
+            v.extend(args.iter());
+            v.push(body);
+            v
+        }
         ExprKind::ListIndex { list, index, .. } => vec![list, index],
         ExprKind::MdIndex { idx, .. } => idx.iter().collect(),
         ExprKind::ListCall { list, args, .. } => {

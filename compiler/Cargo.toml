@@ -1,6 +1,6 @@
 [package]
 name = "sijoc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Prototype compiler for the Sijo game programming language"
 license = "MIT"

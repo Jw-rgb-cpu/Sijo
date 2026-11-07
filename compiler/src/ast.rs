@@ -91,6 +91,9 @@ pub struct FieldDecl {
     pub ty: TypeExpr,
     pub name: String,
     pub init: Option<Expr>,
+    /// `int[K.N] Cells`: an array field whose length is part of its declaration (a constant); `ty`
+    /// is then `int[]`, and `init` is `new int[K.N]` when the declaration has none
+    pub fixed_len: Option<Expr>,
     /// span of the field name
     pub span: Span,
 }

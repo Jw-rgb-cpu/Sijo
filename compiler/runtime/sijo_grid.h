@@ -145,3 +145,69 @@ static void sijo_grid_end(SijoGrid* g, int nthreads) {
     }
     g->start[nb] = part[T];
 }
+
+/* ---------------- grids: 2D and 3D arrays (Grid<T> = T[,], Grid3<T> = T[,,]) ----------------
+ * Step and Move run their cells in parallel from this many cells (when no parallel region is open) */
+#ifndef SIJO_GRID_PAR_MIN
+#define SIJO_GRID_PAR_MIN 4096
+#endif
+/* Grid.Dir(dx, dy, dz): 0 = stay, else 1 + (dx+1) + 3 (dy+1) + 9 (dz+1) */
+static inline int32_t sijo_grid_dir(int32_t dx, int32_t dy, int32_t dz) {
+    if (dx < -1 || dx > 1 || dy < -1 || dy > 1 || dz < -1 || dz > 1) sijo_panic("Grid.Dir: each of dx, dy, dz must be -1, 0 or 1");
+    return (dx | dy | dz) ? 1 + (dx + 1) + 3 * (dy + 1) + 9 * (dz + 1) : 0;
+}
+/* a proposal of Move: Grid.Stay (0) or a Grid.Dir value; anything else panics */
+static inline int32_t sijo_grid_dnorm(int32_t d) {
+    if (d < 0 || d > 27) sijo_panic("Move: the lambda must return Grid.Dir(dx, dy) or Grid.Stay");
+    return d == 14 ? 0 : d;
+}
+static inline int32_t sijo_grid_ddx(int32_t d) { return (d - 1) % 3 - 1; }
+static inline int32_t sijo_grid_ddy(int32_t d) { return (d - 1) / 3 % 3 - 1; }
+static inline int32_t sijo_grid_ddz(int32_t d) { return (d - 1) / 9 - 1; }
+/* Random in the lambda of a grid operation: keyed by the operation (k: one draw of the entity's
+ * sequence), the cell and the draw's number in the cell, so any thread draws the same numbers */
+static inline uint64_t sijo_cell_key(uint64_t k, uint32_t site, uint32_t cell, uint32_t n) {
+    return sijo_mix(k ^ (((uint64_t)site << 32) | n) ^ ((uint64_t)cell * 0x9E3779B97F4A7C15ull));
+}
+static inline float sijo_cell_randf(uint64_t k, uint32_t site, uint32_t cell, uint32_t n, float lo, float hi) {
+    return lo + (hi - lo) * sijo_rand01(sijo_cell_key(k, site, cell, n));
+}
+static inline int32_t sijo_cell_randi(uint64_t k, uint32_t site, uint32_t cell, uint32_t n, int32_t lo, int32_t hi) {
+    if (hi <= lo) return lo;
+    return (int32_t)((int64_t)lo + (int64_t)(sijo_cell_key(k, site, cell, n) % (uint64_t)((int64_t)hi - (int64_t)lo)));
+}
+/* grid.Flood(x, y[, z], v): the region of cells equal (bit for bit) to the start cell, connected
+ * through shared faces, becomes v, breadth first (+x, -x, +y, -y, +z, -z); returns the cells changed */
+static int32_t sijo_grid_flood(SijoList* g, int rank, int32_t x, int32_t y, int32_t z, const void* v, int32_t esz) {
+    int32_t d0 = g->d0, d1 = g->d1, d2 = rank == 3 ? g->d2 : 1;
+    if (x < 0 || x >= d0 || y < 0 || y >= d1 || z < 0 || z >= d2) return 0;
+    uint8_t* b = (uint8_t*)g->data;
+    uint8_t from[16];
+    int32_t start = (x * d1 + y) * d2 + z;
+    memcpy(from, b + (size_t)start * esz, (size_t)esz);
+    if (!memcmp(from, v, (size_t)esz)) return 0;
+    int32_t* q = (int32_t*)sijo_xrealloc(NULL, (size_t)g->len * sizeof(int32_t));
+    int32_t head = 0, tail = 0;
+    memcpy(b + (size_t)start * esz, v, (size_t)esz);
+    q[tail++] = start;
+    while (head < tail) {
+        int32_t i = q[head++];
+        int32_t cz = i % d2, cy = i / d2 % d1, cx = i / d2 / d1;
+        int32_t nb[6]; int nn = 0;
+        if (cx + 1 < d0) nb[nn++] = i + d1 * d2;
+        if (cx > 0) nb[nn++] = i - d1 * d2;
+        if (cy + 1 < d1) nb[nn++] = i + d2;
+        if (cy > 0) nb[nn++] = i - d2;
+        if (rank == 3 && cz + 1 < d2) nb[nn++] = i + 1;
+        if (rank == 3 && cz > 0) nb[nn++] = i - 1;
+        for (int k = 0; k < nn; k++) {
+            uint8_t* c = b + (size_t)nb[k] * esz;
+            if (!memcmp(c, from, (size_t)esz)) {
+                memcpy(c, v, (size_t)esz);
+                q[tail++] = nb[k];
+            }
+        }
+    }
+    free(q);
+    return tail;
+}

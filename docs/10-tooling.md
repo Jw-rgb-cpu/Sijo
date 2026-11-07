@@ -4,17 +4,18 @@ Sijo의 도구는 모두 **컴파일러와 같은 분석 결과**를 씁니다. 
 
 | 도구 | 명령 | 내용 |
 |---|---|---|
-| 린터 | `sijoc lint file.sijo [--fix] [--preset standard\|dotnet]` | 37개 규칙, 의미 기반 자동 수정 |
+| 린터 | `sijoc lint file.sijo [--fix] [--preset standard\|game\|dotnet]` | 38개 규칙, 의미 기반 자동 수정 |
 | 인텔리센스 | `sijoc lsp` (LSP 서버) + `editors/vscode` | 진단·완성·호버·정의·참조·이름 변경·빠른 수정·인레이 힌트 |
 | 라이브 코딩 | `sijoc live file.sijo` | 저장하면 게임이 멈추지 않고 새 코드로 이어서 실행 |
 | 프로젝트 | `sijoc <명령> <디렉터리>` (+ `sijo.toml`) | 여러 파일을 한 프로그램으로 (10.5절) |
 | 디버깅 | `sijoc build --debug` | `#line`으로 gdb·새니타이저·런타임 패닉이 .sijo 줄을 가리킴 (10.6절) |
-| 엔진 연결 | `sijoc build --lib` / `--host host.c` | 임베딩 C API, `extern` 호스트 함수 (10.7절) |
+| 엔진 연결 | `sijoc build --lib` / `--host host.c` | 임베딩 C API, 필드 읽기 함수, `extern` 호스트 함수 (10.7절) |
+| 웹 | `sijoc build --target wasm32` | WebAssembly 모듈 + JS 로더 + 웹 페이지 (10.11절) |
 | 분산 실행 | `prog --shards N` / `prog --shard-of N --shard-id I --peers ...` | 샤드 월드·샤드 프로세스, 체크포인트·복구 (10.10절) |
 
 ## 10.1 자동 린터
 
-"자동"의 의미는 세 가지입니다. 첫째, `sijoc check`와 편집기는 매번(편집기는 매 입력마다) 린트를 실행합니다. `build`/`run`은 한 줄 요약만 보여줍니다. 둘째, 고칠 수 있는 항목은 `--fix`나 편집기의 *Fix All*이 **의미를 보존한 채** 자동으로 고칩니다. 셋째, 게임 전용 규칙은 사람이 따로 지정하지 않아도 컴파일러가 이미 계산한 계획(ECS, 스케줄, 네트워크, 메모리)에서 바로 나옵니다.
+"자동"의 의미는 세 가지입니다. 첫째, `sijoc check`와 편집기는 매번(편집기는 매 입력마다) 린트를 실행합니다. `build`/`run`은 요약과 함께 **게임 동작·속도에 관한 것(L4xx)과 정확성 경고를 먼저** 한 줄씩 다섯 개까지 보여 주고, 이름·모양 힌트는 개수로만 셉니다(`lint: 2 warning(s), 381 hint(s) (3 about how the game runs, 352 about names and layout)`). 둘째, 고칠 수 있는 항목은 `--fix`나 편집기의 *Fix All*이 **의미를 보존한 채** 자동으로 고칩니다. 셋째, 게임 전용 규칙은 사람이 따로 지정하지 않아도 컴파일러가 이미 계산한 계획(ECS, 스케줄, 네트워크, 메모리)에서 바로 나옵니다.
 
 ### 규칙 출처
 
@@ -51,6 +52,8 @@ Sijo의 도구는 모두 **컴파일러와 같은 분석 결과**를 씁니다. 
 
 `dotnet` 프리셋은 .NET 기본 이름 규칙(private 필드 `_camelCase`, 상수 PascalCase, 접두사 규칙 없음)을 씁니다.
 
+`game` 프리셋은 `standard`와 같고, 숫자·벡터(int·float·char·enum·struct) 지역 변수와 매개변수의 한 글자 이름(`x`, `y`, `r`, `t`, `n`, `i`, `v` …)을 허용합니다(L113). 수학과 좌표 코드에서 L113이 힌트의 대부분이 되기 때문입니다. 핸들·문자열·컬렉션의 한 글자 이름은 여전히 알립니다. 모든 프리셋에서 `n / W` 옆에 같은 피연산자의 `n % W`가 있으면 칸 번호 → 좌표 계산으로 보고 L305(정수 나눗셈의 소수점 손실)를 알리지 않습니다.
+
 **린트가 아니라 문법인 것.** C# 코딩 표준이 사람에게 맡기는 몇 가지는 Sijo에서 컴파일 오류이거나 타입이 말하므로 린트 규칙이 없습니다. 오류는 프리셋이나 `.sijolint`로 끌 수 없습니다.
 
 | C# 코딩 표준의 규칙 | Sijo |
@@ -81,7 +84,9 @@ Sijo의 도구는 모두 **컴파일러와 같은 분석 결과**를 씁니다. 
 | L404 | 범위 없이 복제되는 float | 32비트 그대로 전송. `[Precision(0.01)] public mut float in 0..64 X`이면 13비트 |
 | L405 | 클라이언트 코드의 `Random` | 서버가 모르는 값 → 클라이언트와 서버가 어긋남 |
 | L406 | 이웃을 읽으며 자신을 쓰는 필드 | 이중 버퍼링(틱마다 memcpy)이 들어간다는 안내 |
+| L407 | 핸들을 쓰는 `Spawn` | 생성 순서대로 id를 정하려고 시스템이 직렬로 돎. 문장으로만 쓰면 병렬 |
 | L408 | 루프 안 `new List` | 반복마다 할당. 루프 밖에서 만들고 `Clear()` |
+| L409 | 엔티티 시스템(과 그 시스템이 부르는 메서드·정적 함수) 안의 `extern` 호출 | 호스트 호출은 순서대로 일어나므로 그 시스템 전체가 직렬로 돎(경고에 시스템 이름). void면 `[Deferred]`, 아니면 필드에 모았다가 `Game.Update`에서 한 번 |
 
 ### 자동 수정 (`--fix`)
 
@@ -94,13 +99,17 @@ Sijo의 도구는 모두 **컴파일러와 같은 분석 결과**를 씁니다. 
 `.sijolint` 파일을 소스 옆이나 상위 폴더에 둡니다.
 
 ```ini
-preset = standard      # standard(기본, Sijo 코딩 표준) | dotnet (.NET 기본 이름 규칙: _camelCase 등)
+preset = standard      # standard(기본, Sijo 코딩 표준) | game (standard + 수학·좌표용 한 글자 이름) | dotnet (.NET 기본 이름 규칙: _camelCase 등)
 L113 = off             # 규칙 끄기
 unused-local = error   # 이름으로도 지정 가능, 수준: off | hint | warning | error
 max-complexity = 20
 ```
 
 소스 안에서는 `// sijo-lint: disable L204`(파일 전체), `// sijo-lint: disable-next-line L403`, `// sijo-lint: disable-line L304`로 끌 수 있습니다.
+
+**출력과 종료 코드.** 오류만 stderr로, 경고·힌트·요약은 stdout으로 나갑니다(stderr에 무엇이든 쓰면 실패로 보는 셸, 예를 들어 PowerShell에서 성공한 빌드가 실패로 보이지 않도록). `build`/`run`/`check --quiet`는 오류만 출력합니다(`run`은 프로그램에도 `--quiet`를 넘김).
+
+**스케줄 기준선.** `build`/`run`은 엔티티 시스템마다 병렬인지를 `.sijo/schedule`(프로젝트 디렉터리, 파일 하나면 그 옆의 `.sijo/<이름>.schedule`)에 남깁니다. 기준선에서 병렬이던 시스템이 직렬이 되면(지나가며 넣은 extern 호출·`Print`·핸들을 쓰는 `Spawn`) `schedule: Mob.Update ran in parallel in the baseline and now runs serially: <이유>`를 원인을 고치거나 `--accept-schedule`로 새 스케줄을 받아들일 때까지 빌드마다 알립니다. 그 밖의 변화(새 시스템, 직렬 → 병렬)는 조용히 기록됩니다. `.sijo/`는 `.gitignore`에 넣거나, 팀이 함께 보려면 커밋합니다.
 
 `lint`·`check`·`run`·`build`·`explain`·`live`·편집기가 `.sijolint`를 같은 방식으로 읽습니다. `error`로 올린 규칙이 걸리면 `lint`처럼 `check`·`build`·`run`도 종료 코드 1로 실패합니다(경고는 실패하지 않음). 모르는 규칙이나 잘못된 값은 오류이고 명령은 종료 코드 2로 멈춥니다(라이브 코딩은 알리고 기본 설정으로 계속 돕니다). 편집기에서는 문서 맨 위의 진단으로 보입니다.
 
@@ -223,6 +232,20 @@ sijoc build examples/dodge --host examples/dodge/host_term.c --ldflags -lncurses
 
 `extern` 함수의 C 프로토타입은 헤더 끝에 생성됩니다.
 
+**엔티티 필드 읽기.** 엔티티 클래스의 public 필드마다 서버 월드를 읽는 함수가 헤더에 생깁니다. `i`는 그 클래스(하위 클래스 포함)의 살아 있는 엔티티를 테이블 순서로 0..count-1까지 셉니다. 값과 포인터는 다음 step·load·destroy까지 유효합니다.
+
+```c
+int32_t n = sijo_game_World_count(g);                 // World 엔티티 수
+uint64_t id = sijo_game_World_id(g, 0);               // (세대 << 32) | 슬롯
+int32_t len; const int32_t* cells = sijo_game_World_G(g, 0, &len);   // int[] G: 포인터와 길이
+float x = sijo_game_Ship_Pos_X(g, i);                 // struct 필드는 멤버마다
+const char* name = sijo_game_World_Name(g, 0, &len);  // 문자열: UTF-8, NUL로 끝나지 않음
+```
+
+숫자·bool·char·enum·문자열·핸들(`uint64_t`)·그것들로 된 struct·숫자의 배열과 리스트를 읽을 수 있고, 범위 밖 `i`는 0(포인터면 `NULL`, `*len = -1`)입니다. `--lib` 빌드에서는 Sijo 코드가 읽지 않는 public 필드도 호스트가 읽을 수 있도록 저장소를 남깁니다(죽은 필드 제거에서 빠짐). 이름이 API 함수와 겹치면 뒤에 번호가 붙습니다.
+
+**호스트 함수에 배열 넘기기.** `extern` 매개변수가 숫자 배열·리스트이면 C에서는 `const int32_t* cells, int32_t cells_len`(float는 `const float*`, bool은 `const bool*`)로 받습니다. 호출하는 동안만 유효한 읽기 전용 포인터라 복사가 없습니다. `[Deferred]` extern이면 인자가 복사되어 쌓였다가 스테이지 끝에 같은 형태로 전달됩니다(1.11절).
+
 **오류와 스레드.** 게임 코드의 런타임 패닉(범위 밖 인덱스, 없는 사전 키, 0으로 나누기, 메모리 부족 …)은 프로세스를 끝내지 않습니다. 호출이 0을 돌려주고 `sijo_game_error`가 메시지를 주며, 그 게임은 저장된 상태를 복원할 때까지 더 진행하지 않습니다. 병렬 시스템의 작업 스레드에서 난 패닉도 같은 방식으로 잡습니다. 게임의 호스트 콜백 안에서 그 게임을 다시 부르면 -1입니다. 게임 하나는 한 번에 한 스레드만 쓸 수 있고, 서로 다른 게임은 독립적이라 각자 다른 스레드에서 돌려도 됩니다. 엔진의 다른 스레드나 다른 프로세스와 CPU를 나눠 쓴다면 `OMP_WAIT_POLICY=passive`를 권장합니다. OpenMP 기본 정책은 작업 스레드가 다음 일을 바쁘게 기다리므로, CPU가 모자라면 틱이 10배 넘게 느려질 수 있습니다(11.4절).
 
 **C 이외의 언어.** 공유 라이브러리로 빌드하면 C#(P/Invoke), Python(ctypes), Rust·Go(FFI) 등에서 부를 수 있습니다. `extern` 함수는 C 심볼이어야 하므로, 이런 호스트는 함수 포인터를 받아 넘겨주는 몇 줄짜리 C 파일을 함께 링크합니다.
@@ -286,3 +309,18 @@ g = lib.sijo_game_create(42)
 - 실행이 끝나면 코디네이터가 다른 샤드의 행을 모아 월드 체크섬·복제 상태 해시·`--save-state`를 한 프로세스와 같게 출력하고, 샤드 프로세스들은 `== sijo shard I summary ==`(보낸 바이트·메시지, 이양, 재전송, 복구 때 다시 받은 메시지)를 출력합니다.
 - 같은 기계에서는 샤드 프로세스가 코어를 나눠 쓰므로 `OMP_WAIT_POLICY`를 정하지 않으면 `passive`로 자신을 다시 시작합니다. `OMP_NUM_THREADS`는 코어 수 ÷ 샤드 수가 알맞습니다(`bench/shards.py`).
 - `--shards`와 `--shard-of`는 함께 쓸 수 없고, `--profile`·라이브 코딩과도 함께 쓸 수 없습니다.
+
+## 10.11 웹: `--target wasm32`
+
+```bash
+sijoc build examples/arena.sijo --target wasm32 -o web/arena.c   # web/: arena.c, sijo_game.h, arena.wasm, arena.js, index.html
+python3 -m http.server -d web                                     # 브라우저로 http://localhost:8000
+```
+
+clang(wasm32 대상과 wasm-ld, 예: Ubuntu의 `clang`·`lld`)만 있으면 됩니다. emscripten·WASI SDK는 필요 없습니다. 생성되는 C에는 `runtime/sijo_wasm.h`가 C 라이브러리로 들어갑니다: `memory.grow` 위의 크기별 할당기, 문자열·메모리 함수, printf 계열(콘솔로 줄 단위), 로더가 메모리에 가진 파일(저장·복원), 정확한 `fmodf`, 소켓·시그널은 실패하는 대체 함수. 게임 계산은 네이티브와 **비트 단위로 같습니다**(테스트가 arena·boids·village와 격자 프로그램의 체크섬을 비교). OpenMP가 없으므로 한 스레드입니다.
+
+- **로더** `<이름>.js`(ES 모듈): `const game = (await load(host)).create(42n);` 다음에 `step()`(1 성공, 0 패닉으로 멈춤), `error()`, `tick()`, `checksum()`(BigInt), `draws()`(`{ sprite, x, y, text }` 목록), `save(name)`/`load(name 또는 바이트)`, `fields.World_G(0)`(필드 읽기 함수: 숫자 배열은 typed array 뷰, 다음 step까지 유효), `destroy()`. node에서도 같은 파일을 씁니다.
+- **호스트 함수**는 `host` 객체에 C 이름으로 줍니다: 문자열은 JS 문자열, 배열은 typed array(`Int32Array`/`Float32Array`/`Uint8Array`, 호출 중에만 유효), bool은 boolean으로 받고 돌려준 값은 C 타입으로 바뀝니다. 빠진 함수는 경고 한 번과 함께 아무것도 하지 않습니다. `host.print(fd, line)`이 출력을, `host.files`(`Map<string, Uint8Array>`)가 저장 파일을 받습니다.
+- **패닉**: 게임 코드의 패닉은 JS 예외로 API 호출까지 풀리고, 로더가 스택 포인터를 되돌린 뒤 네이티브의 catch 지점과 같은 정리를 합니다. 그래서 `step()`이 0을 돌려주고 `error()`가 `.sijo` 파일:줄을 담은 메시지를 주며, 모듈은 멈추지 않고 저장된 상태를 `load`하면 다시 돕니다(longjmp 없이 trap으로 끝나던 문제).
+- **페이지** `index.html`은 처음 한 번만 씁니다(고쳐 써도 다시 덮지 않음): 60틱/초로 돌리고 그리기 목록을 캔버스에 그리며(스프라이트 번호마다 색 사각형, 텍스트), 키 상태 집합과 호스트 함수 자리가 있습니다.
+- 디버그 빌드는 `--debug`(`-O0 -g`), 추가 옵션은 `--cflags`/`--ldflags`, 다른 clang은 `--cc`.

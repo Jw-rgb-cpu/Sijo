@@ -33,9 +33,24 @@
  *   baseline's value: see sijo_put_leaf
  */
 /* ---------------- platform layer: POSIX sockets or Winsock ---------------- */
+#ifndef SIJO_WASM
 #include <errno.h>
 #include <signal.h>
-#if defined(_WIN32)
+#endif
+#if defined(SIJO_WASM)
+/* --target wasm32: no sockets (the game's own client is in-process); see sijo_wasm.h */
+typedef socklen_t sijo_socklen;
+static int sijo_sock_open_udp(int fam) { (void)fam; return -1; }
+static void sijo_sock_close(int fd) { (void)fd; }
+static void sijo_sock_nonblock(int fd) { (void)fd; }
+static void sijo_sock_poll_in(int fd, int ms) { (void)fd; (void)ms; }
+static int sijo_sock_retry(void) { return 0; }
+static const char* sijo_sock_errstr(void) { return "no network on wasm32"; }
+static void sijo_sleep(double secs) { (void)secs; }
+static uint64_t sijo_pid(void) { return 1; }
+static void sijo_platform_init(void) {}
+static double sijo_now(void) { return sijo_wasm_now(); }
+#elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif

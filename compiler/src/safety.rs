@@ -473,8 +473,11 @@ impl<'a> Mv<'a> {
             }
             // the body runs once per element (zero or more times): a move of an outer local in
             // it is an error, and the second run sees what the first one moved
-            ExprKind::ListLambda { list, params, body, .. } => {
+            ExprKind::ListLambda { list, params, body, args, .. } => {
                 self.expr(list, st);
+                for a in args {
+                    self.expr(a, st);
+                }
                 let over = self.root_local(list);
                 let mut all = st.clone();
                 for _ in 0..2 {
@@ -832,8 +835,11 @@ impl<'a> Da<'a> {
     fn expr(&mut self, e: &Expr, st: &mut Assigned) {
         match &e.kind {
             ExprKind::Local(l) => self.read(st, *l, e.span),
-            ExprKind::ListLambda { list, params, body, .. } => {
+            ExprKind::ListLambda { list, params, body, args, .. } => {
                 self.expr(list, st);
+                for a in args {
+                    self.expr(a, st);
+                }
                 // the body runs zero or more times, with its parameters bound to elements
                 let mut inner = st.clone();
                 if let Some(set) = inner.as_mut() {

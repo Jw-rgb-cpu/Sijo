@@ -143,6 +143,9 @@ pub struct FieldAttrs {
     pub persistent: bool,
     /// `[PersistentKey]`: the string field that names the entity in the store
     pub persistent_key: bool,
+    /// declared `public`: a `--lib` build gives the host a read-only accessor for it and keeps its
+    /// storage even when no Sijo code reads it
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +173,9 @@ pub struct StructDef {
 pub struct EField {
     pub name: String,
     pub class: ClassId,
+    /// `int[K.N] Cells`: the array always holds this many elements (allocated when the entity is
+    /// made, every assignment checked), so loops up to it need no bounds checks
+    pub fixed_len: Option<i32>,
     /// declared `mut`: other fields are set once (initializer or Spawn) and never change
     pub is_mut: bool,
     pub ty: Ty,
@@ -208,6 +214,9 @@ pub struct ClassDef {
     pub overloads: Vec<FuncId>,
     /// Declaration order index among entity classes (for deterministic ordering).
     pub order: usize,
+    /// `[Order(n)]` on an entity class: its systems run before (smaller n) or after (larger n) the
+    /// systems of other classes; classes with the same n keep source order (0 by default)
+    pub run_order: i64,
 }
 
 /// A delegate type. `Func<...>`/`Action<...>` are the same type wherever they have the same
@@ -319,6 +328,9 @@ pub struct Func {
     pub body: Block,
     pub ctx: Ctx,
     pub pure_attr: bool,
+    /// `[Deferred]` on a void extern: calls are queued (per thread, with their arguments) and made
+    /// in row order at the end of the system, so the system can still run in parallel
+    pub deferred_attr: bool,
     pub is_property: bool,
     pub is_override: bool,
     pub is_abstract: bool,
@@ -588,6 +600,12 @@ pub enum Builtin {
     /// a.GetLength(d): args = [array, dimension]; a dimension outside 0..Rank panics (C#'s
     /// IndexOutOfRangeException), a constant one is checked by the type checker
     ArrayGetLength,
+    /// grid.InBounds(x, y[, z]): args [grid, x, y(, z)]
+    GridInBounds,
+    /// grid.Get(x, y[, z], fallback): the cell, or fallback outside the grid
+    GridGet,
+    /// Grid.Dir(dx, dy[, dz]) with each in -1..1: a move direction (0 = Grid.Stay)
+    GridDir,
 }
 
 impl Builtin {
@@ -613,6 +631,9 @@ pub enum ListOp {
     Sort,
     /// Array.Fill(xs, v): every element becomes v
     Fill,
+    /// grid.Flood(x, y[, z], v): the 4- (6-) connected region of cells equal to cell (x, y[, z])
+    /// becomes v; returns how many cells changed
+    GridFlood,
 }
 
 impl ListOp {
@@ -648,6 +669,12 @@ pub enum LamOp {
     Select,
     OrderBy,
     OrderByDesc,
+    /// grid.Step((x, y[, z], c) => new value): every cell at once from the grid as it was (src/grid.rs)
+    GridStep,
+    /// grid.Move(empty, (x, y[, z], c) => Grid.Dir(dx, dy[, dz])): cells move to free neighbours
+    GridMove,
+    /// grid.Ray(x0, y0, x1, y1, c => hit): steps along the line to the first cell that hits, or -1
+    GridRay,
 }
 
 impl LamOp {
@@ -657,7 +684,11 @@ impl LamOp {
     }
     /// changes the list it is called on
     pub fn mutates(self) -> bool {
-        matches!(self, LamOp::Sort | LamOp::RemoveAll)
+        matches!(self, LamOp::Sort | LamOp::RemoveAll | LamOp::GridStep | LamOp::GridMove)
+    }
+    /// a grid operation: the lambda's first parameters are cell coordinates
+    pub fn is_grid(self) -> bool {
+        matches!(self, LamOp::GridStep | LamOp::GridMove | LamOp::GridRay)
     }
 }
 
@@ -769,7 +800,8 @@ pub enum ExprKind {
     /// a list/array operation with a lambda, compiled inline at the call site: `params` (locals of
     /// the enclosing function) take the elements, `body` is evaluated per element; `site` is the
     /// allocation of the resulting list (Where / Select / OrderBy)
-    ListLambda { list: Box<Expr>, op: LamOp, params: Vec<LocalId>, body: Box<Expr>, site: usize },
+    /// `args`: the operation's other arguments (Move's empty value, Ray's end points)
+    ListLambda { list: Box<Expr>, op: LamOp, params: Vec<LocalId>, body: Box<Expr>, site: usize, args: Vec<Expr> },
     ListClone { list: Box<Expr>, site: usize },
     ListLen(Box<Expr>),
     /// `xs[i]`; on a multi-dimensional array `a[i, j]` the index is an MdIndex (and `checked` is
@@ -859,6 +891,9 @@ impl SemIndex {
 
 #[derive(Debug, Default)]
 pub struct Program {
+    /// `order = [...]` in sijo.toml: entity classes or systems (`Mob`, `Mob.Think`) in the order
+    /// their systems run; `"*"` stands for every system not listed (at the end when absent)
+    pub system_order: Vec<String>,
     pub structs: Vec<StructDef>,
     /// interfaces a struct implements (for `where T : I`; a struct value is never an interface)
     pub struct_ifaces: HashMap<StructId, Vec<ClassId>>,
